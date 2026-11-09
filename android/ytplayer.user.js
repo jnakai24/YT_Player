@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.3
+// @version      0.4
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.3';
+  const VERSION = '0.4';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -52,6 +52,18 @@
     if ((settings.last_time || 0) > 5) u.searchParams.set('t', settings.last_time + 's');
     return u.pathname + u.search;
   }
+  // スクリプトが開いたページ（続きから・再生リストを選んだとき）では、開いたあとに再生を始める。
+  // スマホ版の YouTube は、Firefox の自動再生を許可していても、開いただけでは再生を始めないため。
+  // 開く前に印を付け、開いた先のページで印を見て 1 回だけ消費する。
+  function markAutoplay() {
+    try { sessionStorage.setItem('ytp-play', '1'); } catch (e) {}
+  }
+  let wantPlay = false;
+  try {
+    wantPlay = sessionStorage.getItem('ytp-play') === '1';
+    sessionStorage.removeItem('ytp-play');
+  } catch (e) {}
+
   // タブごとに 1 回だけ。YouTube のロゴでトップに戻ったときや、開き直したときにまた飛ばないようにする。
   let resumeSeek = 0;  // 前回の動画のページがそのまま開かれたとき、この位置まで進める
   (function autoResume() {
@@ -62,11 +74,15 @@
     } catch (e) { return; }
     if (location.pathname === '/') {
       // トップページで開いたら、前回の動画へ（ページを読み込む前に飛ぶ）
+      markAutoplay();
       location.replace(resumeUrl());
     } else if (location.pathname === '/watch') {
       // Firefox が前回のタブを開き直したときなど。同じ動画で位置の指定がなければ、前回の位置まで進める
       const here = new URL(location.href).searchParams, last = new URL(settings.last_url).searchParams;
-      if (here.get('v') === last.get('v') && !here.get('t') && (settings.last_time || 0) > 5) resumeSeek = settings.last_time;
+      if (here.get('v') === last.get('v') && !here.get('t') && (settings.last_time || 0) > 5) {
+        resumeSeek = settings.last_time;
+        wantPlay = true;
+      }
     }
   })();
 
@@ -268,6 +284,7 @@
     save();
     // watch?list=ID だけ（v= なし）だと再生されないので、先頭の動画から開く
     const p = (settings.playlists || []).find(x => x.id === id);
+    if (p && p.vid) markAutoplay();
     location.href = p && p.vid ? '/watch?v=' + p.vid + '&list=' + id : '/playlist?list=' + id;
   });
   refreshBtn.addEventListener('click', refresh);
@@ -281,7 +298,7 @@
     if (p.getPlayerState() === 1) p.pauseVideo(); else p.playVideo();
     setTimeout(tick, 300);
   });
-  resumeBtn.addEventListener('click', () => { const u = resumeUrl(); if (u) location.href = u; });
+  resumeBtn.addEventListener('click', () => { const u = resumeUrl(); if (u) { markAutoplay(); location.href = u; } });
   bgBox.addEventListener('change', () => { settings.bg = bgBox.checked; save(); });
   resumeBox.addEventListener('change', () => { settings.autoresume = resumeBox.checked; save(); });
   optBtn.addEventListener('click', () => { settings.showopts = !settings.showopts; save(); applyOpts(); });
@@ -298,6 +315,25 @@
       if (p.getCurrentTime() < resumeSeek - 5) p.seekTo(resumeSeek, true);
       clearInterval(timer);
       resumeSeek = 0;
+    }, 500);
+  }
+
+  // 開いたページで再生を始める（wantPlay のとき）。再生が始まったら終わり。
+  // 利用者の一時停止とぶつからないよう、試すのは 2 秒おきに数回、20 秒まで。
+  function startPlaying() {
+    if (!wantPlay) return;
+    const started = Date.now();
+    let tries = 0, last = 0;
+    const timer = setInterval(() => {
+      const p = player();
+      if (Date.now() - started > 20000 || tries >= 5) { clearInterval(timer); return; }
+      if (!p || !p.getDuration || !(p.getDuration() > 0) || resumeSeek) return;
+      const state = p.getPlayerState();
+      if (state === 1) { clearInterval(timer); return; }  // 再生中
+      if (state === 3 || Date.now() - last < 2000) return;  // 読み込み中 / 直前に試した
+      last = Date.now();
+      tries++;
+      p.playVideo();
     }, 500);
   }
 
@@ -348,6 +384,7 @@
     applyFold();
     applyOpts();
     seekToLast();
+    startPlaying();
     tick();
     setInterval(tick, 1000);
     // 前回の一覧をすぐ出し、裏で取り直して新しく作った・保存した再生リストも反映する
