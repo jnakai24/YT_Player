@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.7
+// @version      0.8
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.7';
+  const VERSION = '0.8';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -95,20 +95,46 @@
   // YouTube はページが見えなくなったこと（document.hidden / visibilitychange）を見て再生を止めるので、
   // ずっと見えていることにする。Premium の機能を回避する使い方なので、既定はオフ。
   // ページより先に仕込む必要があるため @run-at document-start。
-  // 「裏で再生」がオフのときは逆に、ページが見えなくなったら（別のアプリ・ホーム画面・最近のアプリ一覧に切り替えた、
-  // 画面を消した）スクリプトが一時停止する。Firefox のスマホ版 YouTube は、Premium などで止めないことがあるため。
+  // ---- Firefox から届く知らせの記録（⚙ の行に出す） ----
+  // 「Firefox を終了したときだけ止める」ための調査用。ページの中からは、Firefox が終了したのか、
+  // 裏に回っただけなのか（別のアプリ・ホーム画面・画面を消した）を見分けられるか分かっていないので、
+  // まず何が届くかを記録する。終了のときだけ届く知らせがあれば、それで止める。
+  // 記録するもの：見える / 見えない（visibilitychange）、フォーカス、pagehide / pageshow / freeze / resume / beforeunload、
+  // 描画の停止 / 再開（requestAnimationFrame が 3 秒以上来ない）。それぞれの時点の再生状態も添える。
   const realHidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden').get;
-  function pauseIfHidden() {
-    if (settings.bg || !realHidden.call(document)) return;
+  function log(text) {
+    const d = new Date(), hms = [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
     const p = player();
-    if (p && p.getPlayerState() === 1) p.pauseVideo();
+    const state = p ? ({'-1': '未開始', 0: '終了', 1: '再生中', 2: '停止中', 3: '読込中', 5: '待機'})[p.getPlayerState()] || '' : '';
+    try {
+      const lines = JSON.parse(localStorage.getItem('ytp-log') || '[]');
+      lines.push(hms + ' ' + text + (state ? '（' + state + '）' : ''));
+      localStorage.setItem('ytp-log', JSON.stringify(lines.slice(-12)));
+    } catch (e) {}
   }
   (function installBackground() {
     for (const type of ['visibilitychange', 'webkitvisibilitychange']) {
-      window.addEventListener(type, e => { if (settings.bg) e.stopImmediatePropagation(); else pauseIfHidden(); }, true);
+      window.addEventListener(type, e => {
+        if (type === 'visibilitychange') log(realHidden.call(document) ? '見えなくなった' : '見えるようになった');
+        if (settings.bg) e.stopImmediatePropagation();
+      }, true);
       document.addEventListener(type, e => { if (settings.bg) e.stopImmediatePropagation(); }, true);
     }
-    window.addEventListener('pagehide', pauseIfHidden, true);
+    window.addEventListener('pagehide', e => log('pagehide' + (e.persisted ? '（保存）' : '')), true);
+    window.addEventListener('pageshow', e => { if (e.persisted) log('pageshow（復帰）'); }, true);
+    window.addEventListener('beforeunload', () => log('beforeunload'), true);
+    document.addEventListener('freeze', () => log('freeze'), true);
+    document.addEventListener('resume', () => log('resume'), true);
+    window.addEventListener('blur', e => { if (e.target === window) log('フォーカスが外れた'); }, true);
+    window.addEventListener('focus', e => { if (e.target === window) log('フォーカスが戻った'); }, true);
+    let lastFrame = Date.now(), stalled = false;
+    const frame = () => { lastFrame = Date.now(); requestAnimationFrame(frame); };
+    requestAnimationFrame(frame);
+    setInterval(() => {
+      const gap = Date.now() - lastFrame;
+      if (gap > 3000 && !stalled) { stalled = true; log('描画が止まった'); }
+      else if (gap < 1000 && stalled) { stalled = false; log('描画が再開した'); }
+    }, 1000);
     // YouTube が読む document.hidden などを上書きする（コンテンツスクリプトのときはページ側の document に）
     const doc = pageObj(document);
     const proto = Document.prototype;
@@ -314,7 +340,9 @@
   row2.append(prevBtn, playBtn, nextBtn, info);
   // 版と、スクリプトが動いている場所（page / content）。うまく動かないときの手がかり
   const about = el('span', {textContent: 'v' + VERSION + ' · ' + MODE}, {color: '#888', fontSize: '12px', marginLeft: 'auto'});
-  row3.append(resumeLabel, bgLabel, about);
+  // 裏に回ったときに何が届いたかの記録（新しいものが下）
+  const logEl = el('div', {}, {width: '100%', color: '#888', fontSize: '11px', whiteSpace: 'pre-wrap', lineHeight: '1.4'});
+  row3.append(resumeLabel, bgLabel, about, logEl);
   bar.append(row1, rowTitle, row2, row3);
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
@@ -383,7 +411,14 @@
   bgBox.addEventListener('change', () => { settings.bg = bgBox.checked; save(); });
   resumeBox.addEventListener('change', () => { settings.autoresume = resumeBox.checked; save(); });
   optBtn.addEventListener('click', () => { settings.showopts = !settings.showopts; save(); applyOpts(); });
-  function applyOpts() { row3.style.display = settings.showopts ? 'flex' : 'none'; }
+  function applyOpts() { row3.style.display = settings.showopts ? 'flex' : 'none'; showLog(); }
+  function showLog() {
+    if (!settings.showopts) return;
+    let lines = [];
+    try { lines = JSON.parse(localStorage.getItem('ytp-log') || '[]'); } catch (e) {}
+    const text = lines.length ? '記録:\n' + lines.join('\n') : '';
+    if (logEl.textContent !== text) logEl.textContent = text;
+  }
 
   // 開いたページで再生を始め（wantPlay）、前回の位置まで進める（resumeSeek）。
   // 進めるのは再生が始まってから（始まる前に進めても、Firefox では再生開始で先頭に戻ることがある）。広告の間は待つ。
@@ -431,6 +466,7 @@
   function tick() {
     if (!bar.isConnected) document.documentElement.append(bar, openBtn);
     tryStep();
+    showLog();
     const p = player();
     const watching = location.pathname.startsWith('/watch') && p;
     playBtn.textContent = watching && p.getPlayerState() === 1 ? '⏸︎' : '▶︎';
