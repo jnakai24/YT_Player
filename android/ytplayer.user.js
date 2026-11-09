@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.1
+// @version      0.2
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.1';
+  const VERSION = '0.2';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -29,6 +29,34 @@
   function save() {
     try { localStorage.setItem(STORE, JSON.stringify(settings)); } catch (e) {}
   }
+
+  // ---- 開いたら前回の続きから流す（「開いたら続きから」がオンのとき。既定はオン） ----
+  // 前回の動画を止めた位置から開く URL。開いているサイト（m. / www.）のまま開く。
+  function resumeUrl() {
+    if (!settings.last_url) return null;
+    const u = new URL(settings.last_url);
+    u.searchParams.delete('pp');
+    u.searchParams.delete('t');
+    if ((settings.last_time || 0) > 5) u.searchParams.set('t', settings.last_time + 's');
+    return u.pathname + u.search;
+  }
+  // タブごとに 1 回だけ。YouTube のロゴでトップに戻ったときや、開き直したときにまた飛ばないようにする。
+  let resumeSeek = 0;  // 前回の動画のページがそのまま開かれたとき、この位置まで進める
+  (function autoResume() {
+    if (settings.autoresume === false || !settings.last_url) return;
+    try {
+      if (sessionStorage.getItem('ytp-resumed')) return;
+      sessionStorage.setItem('ytp-resumed', '1');
+    } catch (e) { return; }
+    if (location.pathname === '/') {
+      // トップページで開いたら、前回の動画へ（ページを読み込む前に飛ぶ）
+      location.replace(resumeUrl());
+    } else if (location.pathname === '/watch') {
+      // Firefox が前回のタブを開き直したときなど。同じ動画で位置の指定がなければ、前回の位置まで進める
+      const here = new URL(location.href).searchParams, last = new URL(settings.last_url).searchParams;
+      if (here.get('v') === last.get('v') && !here.get('t') && (settings.last_time || 0) > 5) resumeSeek = settings.last_time;
+    }
+  })();
 
   // ---- 画面を消しても再生を続ける（「裏で再生」がオンのときだけ） ----
   // YouTube はページが見えなくなったこと（document.hidden / visibilitychange）を見て再生を止めるので、
@@ -139,19 +167,28 @@
   const sel = el('select', {title: '再生リスト'}, Object.assign({}, ctrl, {flex: '1', minWidth: '0', maxWidth: isMobile ? 'none' : '280px'}));
   const refreshBtn = el('button', {textContent: '⟳', title: '再生リストを取得し直す'}, ctrl);
   const foldBtn = el('button', {textContent: '▾', title: 'たたむ'}, ctrl);
+  const optBtn = el('button', {textContent: '⚙', title: '設定'}, ctrl);
   const prevBtn = el('button', {textContent: '⏮︎', title: '前の動画'}, ctrl);
   const playBtn = el('button', {textContent: '▶︎', title: '再生 / 一時停止'}, ctrl);
   const nextBtn = el('button', {textContent: '⏭︎', title: '次の動画'}, ctrl);
   const resumeBtn = el('button', {textContent: '続きから', title: '前回の動画の続きから再生'}, ctrl);
-  const bgLabel = el('label', {title: '画面を消したり別のアプリに切り替えたりしても再生を続ける'},
-                     {display: 'flex', gap: '3px', alignItems: 'center', cursor: 'pointer', whiteSpace: 'nowrap'});
-  const bgBox = el('input', {type: 'checkbox'});
-  bgLabel.append(bgBox, document.createTextNode('裏で再生'));
+  function checkbox(text, title) {
+    const label = el('label', {title: title},
+                     {display: 'flex', gap: '4px', alignItems: 'center', cursor: 'pointer', whiteSpace: 'nowrap'});
+    const box = el('input', {type: 'checkbox'});
+    label.append(box, document.createTextNode(text));
+    return [label, box];
+  }
+  const [resumeLabel, resumeBox] = checkbox('開いたら続きから', 'YouTube のトップを開いたら、前回の動画の続きから再生する');
+  const [bgLabel, bgBox] = checkbox('裏で再生', '画面を消したり別のアプリに切り替えたりしても再生を続ける');
   const info = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', textOverflow: 'ellipsis',
                                whiteSpace: 'nowrap', color: '#aaa', fontSize: '12px', textAlign: 'right'});
-  row1.append(sel, refreshBtn, foldBtn);
-  row2.append(prevBtn, playBtn, nextBtn, resumeBtn, info, bgLabel);
-  bar.append(row1, row2);
+  // 設定（⚙ で開く）
+  const row3 = el('div', {}, {display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap'});
+  row1.append(sel, refreshBtn, optBtn, foldBtn);
+  row2.append(prevBtn, playBtn, nextBtn, resumeBtn, info);
+  row3.append(resumeLabel, bgLabel);
+  bar.append(row1, row2, row3);
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
                      Object.assign({}, ctrl, {position: 'fixed', zIndex: '2147483647', right: '10px',
@@ -188,15 +225,6 @@
       showMessage(e.message, true);
     }
   }
-  function resumeUrl() {
-    if (!settings.last_url) return null;
-    const u = new URL(settings.last_url);
-    u.searchParams.delete('pp');
-    u.searchParams.delete('t');
-    if ((settings.last_time || 0) > 5) u.searchParams.set('t', settings.last_time + 's');
-    return u.href;
-  }
-
   sel.addEventListener('change', () => {
     const id = sel.value;
     if (!id) return;
@@ -221,6 +249,23 @@
   });
   resumeBtn.addEventListener('click', () => { const u = resumeUrl(); if (u) location.href = u; });
   bgBox.addEventListener('change', () => { settings.bg = bgBox.checked; save(); });
+  resumeBox.addEventListener('change', () => { settings.autoresume = resumeBox.checked; save(); });
+  optBtn.addEventListener('click', () => { settings.showopts = !settings.showopts; save(); applyOpts(); });
+  function applyOpts() { row3.style.display = settings.showopts ? 'flex' : 'none'; }
+
+  // 前回の動画のページがそのまま開かれたとき、プレイヤーの準備ができたら前回の位置まで進める
+  function seekToLast() {
+    if (!resumeSeek) return;
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const p = player();
+      if (Date.now() - started > 20000) { clearInterval(timer); resumeSeek = 0; return; }
+      if (!p || !p.getDuration || !(p.getDuration() > 0)) return;
+      if (p.getCurrentTime() < resumeSeek - 5) p.seekTo(resumeSeek, true);
+      clearInterval(timer);
+      resumeSeek = 0;
+    }, 500);
+  }
 
   // ロック画面・通知の「前へ」「次へ」も再生リストの曲送りにする
   function setMediaSession() {
@@ -249,8 +294,9 @@
         info.textContent = 'v' + VERSION;
       }
     }
-    // 再生中の URL と位置を覚える（「続きから」で使う）。YouTube は曲送りでページを読み直さないので URL を毎回見る
-    if (watching && id && Date.now() - lastSave > 5000) {
+    // 再生中の URL と位置を覚える（「続きから」で使う）。YouTube は曲送りでページを読み直さないので URL を毎回見る。
+    // 再生中のときだけ記録する。開いた直後（前回の位置へ進む前・自動再生が止められて始まっていないとき）に 0 秒で上書きしないため
+    if (watching && id && !resumeSeek && p.getPlayerState() === 1 && Date.now() - lastSave > 5000) {
       lastSave = Date.now();
       settings.last_url = location.href;
       settings.last_time = Math.floor(p.getCurrentTime());
@@ -261,9 +307,12 @@
 
   function start() {
     bgBox.checked = !!settings.bg;
+    resumeBox.checked = settings.autoresume !== false;
     fill(settings.playlists, currentList() || settings.last_playlist);
     document.documentElement.append(bar, openBtn);
     applyFold();
+    applyOpts();
+    seekToLast();
     tick();
     setInterval(tick, 1000);
     // 前回の一覧をすぐ出し、裏で取り直して新しく作った・保存した再生リストも反映する
