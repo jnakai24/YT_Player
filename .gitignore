@@ -1,0 +1,17 @@
+# Google OAuth client and tokens (never commit)
+client_secret*.json
+token*.json
+
+# Login data, settings and WebView2 profile
+data/
+
+# Personal playlist text files
+playlist_tools/*.txt
+playlist_tools/*.txt.bak
+
+# Python / PyInstaller
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
