@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.4
+// @version      0.5
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.4';
+  const VERSION = '0.5';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -118,10 +118,20 @@
   // 再生リストの次 / 前の動画へ。パソコン版はプレイヤー自身が再生リストを持っているので nextVideo / previousVideo でよいが、
   // スマホ版はプレイヤーが再生リストを持たず（getPlaylist() が空で nextVideo が空振りする）、ページ側の一覧
   // （ytm-playlist-panel-video-renderer）が順番を管理している。そこから今の動画の次 / 前の項目を探して開く。
+  // ページを開いた直後（広告の再生中など）は、ページ側の一覧がまだできていないことがある。
+  // そのときは押された操作を覚えておき、一覧ができたら送る（最大 10 秒。過ぎたらプレイヤーに頼む）。
+  let pendingStep = null;
   function step(delta) {
+    pendingStep = {delta: delta, until: Date.now() + 10000};
+    tryStep();
+  }
+  function tryStep() {
+    if (!pendingStep) return;
+    const delta = pendingStep.delta;
     const p = player();
     const list = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
     if (list && list.length) {
+      pendingStep = null;
       if (delta > 0) p.nextVideo(); else p.previousVideo();
       return;
     }
@@ -129,9 +139,17 @@
     const links = [...document.querySelectorAll('ytm-playlist-panel-video-renderer')]
       .map(item => item.querySelector('a[href*="/watch"]')).filter(Boolean);
     const i = links.findIndex(a => new URL(a.href, location.href).searchParams.get('v') === v);
-    const target = i >= 0 ? links[i + delta] : null;
-    if (target) target.click();
-    else if (p) { if (delta > 0) p.nextVideo(); else p.previousVideo(); }
+    if (i >= 0) {
+      pendingStep = null;
+      const target = links[i + delta];
+      if (target) target.click();  // 先頭で ⏮ / 最後で ⏭ のときは何もしない
+      return;
+    }
+    if (!currentList() || Date.now() > pendingStep.until) {
+      // 再生リストでない動画、または一覧が出てこないとき
+      pendingStep = null;
+      if (p) { if (delta > 0) p.nextVideo(); else p.previousVideo(); }
+    }
   }
   function currentList() {
     try { return new URL(location.href).searchParams.get('list'); } catch (e) { return null; }
@@ -217,9 +235,9 @@
   const foldBtn = el('button', {textContent: '▾', title: 'たたむ'}, ctrl);
   const optBtn = el('button', {textContent: '⚙', title: '設定'}, ctrl);
   const prevBtn = el('button', {textContent: '⏮︎', title: '前の動画'}, ctrl);
-  const playBtn = el('button', {textContent: '▶︎', title: '再生 / 一時停止'}, ctrl);
+  // 動画を見ていないとき（トップ・検索・再生リストのページなど）は、前回の動画を止めた位置から再生する
+  const playBtn = el('button', {textContent: '▶︎', title: '再生 / 一時停止（動画を見ていないときは前回の続きから）'}, ctrl);
   const nextBtn = el('button', {textContent: '⏭︎', title: '次の動画'}, ctrl);
-  const resumeBtn = el('button', {textContent: '続きから', title: '前回の動画の続きから再生'}, ctrl);
   function checkbox(text, title) {
     const label = el('label', {title: title},
                      {display: 'flex', gap: '4px', alignItems: 'center', cursor: 'pointer', whiteSpace: 'nowrap'});
@@ -231,14 +249,19 @@
   const [bgLabel, bgBox] = checkbox('裏で再生', '画面を消したり別のアプリに切り替えたりしても再生を続ける');
   const info = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', textOverflow: 'ellipsis',
                                whiteSpace: 'nowrap', color: '#aaa', fontSize: '12px', textAlign: 'right'});
+  // 再生中の動画のタイトルと再生位置。動画を見ていないときは前回の動画（▶ で続きから流れるもの）
+  const rowTitle = el('div', {}, {display: 'flex', gap: '8px', alignItems: 'baseline', fontSize: '13px'});
+  const titleEl = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'});
+  const timeEl = el('span', {}, {color: '#aaa', fontSize: '12px', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums'});
+  rowTitle.append(titleEl, timeEl);
   // 設定（⚙ で開く）
   const row3 = el('div', {}, {display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap'});
   row1.append(sel, refreshBtn, optBtn, foldBtn);
-  row2.append(prevBtn, playBtn, nextBtn, resumeBtn, info);
+  row2.append(prevBtn, playBtn, nextBtn, info);
   // 版と、スクリプトが動いている場所（page / content）。うまく動かないときの手がかり
   const about = el('span', {textContent: 'v' + VERSION + ' · ' + MODE}, {color: '#888', fontSize: '12px', marginLeft: 'auto'});
   row3.append(resumeLabel, bgLabel, about);
-  bar.append(row1, row2, row3);
+  bar.append(row1, rowTitle, row2, row3);
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
                      Object.assign({}, ctrl, {position: 'fixed', zIndex: '2147483647', right: '10px',
@@ -281,6 +304,7 @@
     settings.last_playlist = id;
     delete settings.last_url;
     delete settings.last_time;
+    delete settings.last_title;
     save();
     // watch?list=ID だけ（v= なし）だと再生されないので、先頭の動画から開く
     const p = (settings.playlists || []).find(x => x.id === id);
@@ -294,11 +318,14 @@
   nextBtn.addEventListener('click', () => step(1));
   playBtn.addEventListener('click', () => {
     const p = player();
-    if (!p) return;
+    if (!location.pathname.startsWith('/watch') || !p) {
+      const u = resumeUrl();
+      if (u) { markAutoplay(); location.href = u; }
+      return;
+    }
     if (p.getPlayerState() === 1) p.pauseVideo(); else p.playVideo();
     setTimeout(tick, 300);
   });
-  resumeBtn.addEventListener('click', () => { const u = resumeUrl(); if (u) { markAutoplay(); location.href = u; } });
   bgBox.addEventListener('change', () => { settings.bg = bgBox.checked; save(); });
   resumeBox.addEventListener('change', () => { settings.autoresume = resumeBox.checked; save(); });
   optBtn.addEventListener('click', () => { settings.showopts = !settings.showopts; save(); applyOpts(); });
@@ -351,26 +378,37 @@
   let lastSave = 0;
   function tick() {
     if (!bar.isConnected) document.documentElement.append(bar, openBtn);
+    tryStep();
     const p = player();
     const watching = location.pathname.startsWith('/watch') && p;
     playBtn.textContent = watching && p.getPlayerState() === 1 ? '⏸︎' : '▶︎';
-    resumeBtn.style.display = !watching && settings.last_url ? 'block' : 'none';
+    prevBtn.disabled = nextBtn.disabled = !watching;
+    prevBtn.style.opacity = nextBtn.style.opacity = watching ? '1' : '.4';
     const id = currentList();
     if (id && sel.value !== id && [...sel.options].some(o => o.value === id)) sel.value = id;
-    if (!message) {
-      if (watching) {
-        const d = p.getDuration ? p.getDuration() : 0, t = p.getCurrentTime ? p.getCurrentTime() : 0;
-        info.textContent = d > 0 ? fmt(t) + ' / ' + fmt(d) : (t ? fmt(t) : '');
-      } else {
-        info.textContent = 'v' + VERSION;
-      }
+    let title = '', time = '';
+    if (watching) {
+      // getVideoData() は曲送りの直後など、まだ空のことがある。そのときはページのタイトル（「… - YouTube」）を使う
+      const d = p.getVideoData ? p.getVideoData() : null;
+      title = (d && d.title) || document.title.replace(/ - YouTube$/, '');
+      const dur = p.getDuration ? p.getDuration() : 0, t = p.getCurrentTime ? p.getCurrentTime() : 0;
+      time = dur > 0 ? fmt(t) + ' / ' + fmt(dur) : (t ? fmt(t) : '');
+      titleEl.style.color = '#fff';
+    } else if (settings.last_url) {
+      title = settings.last_title || '前回の続き';
+      time = settings.last_time ? fmt(settings.last_time) + ' から' : '';
+      titleEl.style.color = '#aaa';
     }
+    if (titleEl.textContent !== title) { titleEl.textContent = title; titleEl.title = title; }
+    timeEl.textContent = time;
+    rowTitle.style.display = title ? 'flex' : 'none';
     // 再生中の URL と位置を覚える（「続きから」で使う）。YouTube は曲送りでページを読み直さないので URL を毎回見る。
     // 再生中のときだけ記録する。開いた直後（前回の位置へ進む前・自動再生が止められて始まっていないとき）に 0 秒で上書きしないため
     if (watching && id && !resumeSeek && p.getPlayerState() === 1 && Date.now() - lastSave > 5000) {
       lastSave = Date.now();
       settings.last_url = location.href;
       settings.last_time = Math.floor(p.getCurrentTime());
+      if (title && title !== 'YouTube') settings.last_title = title;
       save();
       setMediaSession();
     }
