@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.5
+// @version      0.6
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.5';
+  const VERSION = '0.6';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -52,20 +52,25 @@
     if ((settings.last_time || 0) > 5) u.searchParams.set('t', settings.last_time + 's');
     return u.pathname + u.search;
   }
-  // スクリプトが開いたページ（続きから・再生リストを選んだとき）では、開いたあとに再生を始める。
-  // スマホ版の YouTube は、Firefox の自動再生を許可していても、開いただけでは再生を始めないため。
-  // 開く前に印を付け、開いた先のページで印を見て 1 回だけ消費する。
-  function markAutoplay() {
-    try { sessionStorage.setItem('ytp-play', '1'); } catch (e) {}
+  // スクリプトが開いたページ（続きから・再生リストを選んだとき）では、開いたあとに再生を始め、前回の位置まで進める。
+  // スマホ版の YouTube は、Firefox の自動再生を許可していても、開いただけでは再生を始めない。
+  // また Firefox では URL の位置指定（t=）が効く前に再生が始まって先頭から流れることがあるので、位置はスクリプトが合わせる。
+  // 開く前に印（進める秒数）を付け、開いた先のページで印を見て 1 回だけ消費する。
+  function markAutoplay(seconds) {
+    try { sessionStorage.setItem('ytp-play', String(Math.floor(seconds || 0))); } catch (e) {}
   }
   let wantPlay = false;
+  let resumeSeek = 0;  // この位置まで進める（0 なら進めない）
   try {
-    wantPlay = sessionStorage.getItem('ytp-play') === '1';
+    const mark = sessionStorage.getItem('ytp-play');
     sessionStorage.removeItem('ytp-play');
+    if (mark !== null) {
+      wantPlay = true;
+      if (Number(mark) > 5) resumeSeek = Number(mark);
+    }
   } catch (e) {}
 
   // タブごとに 1 回だけ。YouTube のロゴでトップに戻ったときや、開き直したときにまた飛ばないようにする。
-  let resumeSeek = 0;  // 前回の動画のページがそのまま開かれたとき、この位置まで進める
   (function autoResume() {
     if (settings.autoresume === false || !settings.last_url) return;
     try {
@@ -74,7 +79,7 @@
     } catch (e) { return; }
     if (location.pathname === '/') {
       // トップページで開いたら、前回の動画へ（ページを読み込む前に飛ぶ）
-      markAutoplay();
+      markAutoplay(settings.last_time);
       location.replace(resumeUrl());
     } else if (location.pathname === '/watch') {
       // Firefox が前回のタブを開き直したときなど。同じ動画で位置の指定がなければ、前回の位置まで進める
@@ -219,6 +224,9 @@
   const ctrl = {background: '#272727', color: '#fff', border: '1px solid #444', borderRadius: '6px',
                 font: 'inherit', padding: isMobile ? '6px 8px' : '3px 6px', minWidth: isMobile ? '40px' : '0',
                 cursor: 'pointer'};
+  // スマホでは押しやすいよう大きくする。⏮ ⏯ ⏭ はさらに大きく
+  const tool = isMobile ? Object.assign({}, ctrl, {padding: '10px 0', minWidth: '52px', fontSize: '20px', lineHeight: '1'}) : ctrl;
+  const big = isMobile ? Object.assign({}, ctrl, {padding: '12px 0', minWidth: '80px', fontSize: '26px', lineHeight: '1'}) : ctrl;
   const bar = el('div', {id: 'ytp-bar'}, {
     position: 'fixed', zIndex: '2147483647', boxSizing: 'border-box',
     // スマホ版は画面下に YouTube のメニューがあるので、その上に置く
@@ -230,14 +238,15 @@
   });
   const row1 = el('div', {}, {display: 'flex', gap: '6px', alignItems: 'center'});
   const row2 = el('div', {}, {display: 'flex', gap: '6px', alignItems: 'center'});
-  const sel = el('select', {title: '再生リスト'}, Object.assign({}, ctrl, {flex: '1', minWidth: '0', maxWidth: isMobile ? 'none' : '280px'}));
-  const refreshBtn = el('button', {textContent: '⟳', title: '再生リストを取得し直す'}, ctrl);
-  const foldBtn = el('button', {textContent: '▾', title: 'たたむ'}, ctrl);
-  const optBtn = el('button', {textContent: '⚙', title: '設定'}, ctrl);
-  const prevBtn = el('button', {textContent: '⏮︎', title: '前の動画'}, ctrl);
+  const sel = el('select', {title: '再生リスト'}, Object.assign({}, ctrl, {flex: '1', minWidth: '0', maxWidth: isMobile ? 'none' : '280px',
+                                                             padding: isMobile ? '12px 8px' : ctrl.padding}));
+  const refreshBtn = el('button', {textContent: '⟳', title: '再生リストを取得し直す'}, tool);
+  const foldBtn = el('button', {textContent: '▾', title: 'たたむ'}, tool);
+  const optBtn = el('button', {textContent: '⚙', title: '設定'}, tool);
+  const prevBtn = el('button', {textContent: '⏮︎', title: '前の動画'}, big);
   // 動画を見ていないとき（トップ・検索・再生リストのページなど）は、前回の動画を止めた位置から再生する
-  const playBtn = el('button', {textContent: '▶︎', title: '再生 / 一時停止（動画を見ていないときは前回の続きから）'}, ctrl);
-  const nextBtn = el('button', {textContent: '⏭︎', title: '次の動画'}, ctrl);
+  const playBtn = el('button', {textContent: '▶︎', title: '再生 / 一時停止（動画を見ていないときは前回の続きから）'}, big);
+  const nextBtn = el('button', {textContent: '⏭︎', title: '次の動画'}, big);
   function checkbox(text, title) {
     const label = el('label', {title: title},
                      {display: 'flex', gap: '4px', alignItems: 'center', cursor: 'pointer', whiteSpace: 'nowrap'});
@@ -251,7 +260,43 @@
                                whiteSpace: 'nowrap', color: '#aaa', fontSize: '12px', textAlign: 'right'});
   // 再生中の動画のタイトルと再生位置。動画を見ていないときは前回の動画（▶ で続きから流れるもの）
   const rowTitle = el('div', {}, {display: 'flex', gap: '8px', alignItems: 'baseline', fontSize: '13px'});
-  const titleEl = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'});
+  const titleEl = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', whiteSpace: 'nowrap'});
+  // 長いタイトルは 10 秒おきに左へ流す。後ろに同じタイトルをもう 1 つ並べ、それが先頭の位置に来たら止める
+  // （見た目は先頭に戻ったのと同じ）。そこからまた 10 秒待つ。
+  const titleMove = el('span', {}, {display: 'inline-block', whiteSpace: 'nowrap'});
+  const titleA = el('span', {}, {paddingRight: '3em'});
+  const titleB = el('span');
+  titleMove.append(titleA, titleB);
+  titleEl.append(titleMove);
+  let titleText = null, titleTimer = null, titleAnim = null, titleWidth = 0;
+  function setTitle(text) {
+    // 再生位置の桁が変わると幅が少し変わるので、少しの違いでは流し直さない
+    if (text === titleText && Math.abs(titleEl.clientWidth - titleWidth) < 20) return;
+    titleText = text;
+    titleWidth = titleEl.clientWidth;
+    titleEl.title = text;
+    clearTimeout(titleTimer);
+    if (titleAnim) { titleAnim.cancel(); titleAnim = null; }
+    titleA.textContent = text;
+    titleB.textContent = '';
+    titleA.style.paddingRight = '0';
+    if (!text || !titleWidth || titleA.offsetWidth <= titleWidth) return;  // 収まっている
+    titleA.style.paddingRight = '3em';
+    titleB.textContent = text;
+    const distance = titleA.offsetWidth;
+    const duration = distance / 40 * 1000;  // 1 秒に 40px
+    const scroll = () => {
+      titleAnim = titleMove.animate([{transform: 'translateX(0)'}, {transform: 'translateX(-' + distance + 'px)'}],
+                                    {duration: duration, easing: 'linear'});
+      // 終わりはタイマーで受ける（アニメーションの終了の知らせは、画面が描かれていないと届かないため）。
+      // 取り消すと先頭の位置に戻るが、そのとき見えているのは 2 つ目のタイトルの先頭なので、見た目は変わらない
+      titleTimer = setTimeout(() => {
+        if (titleAnim) { titleAnim.cancel(); titleAnim = null; }
+        titleTimer = setTimeout(scroll, 10000);
+      }, duration);
+    };
+    titleTimer = setTimeout(scroll, 10000);
+  }
   const timeEl = el('span', {}, {color: '#aaa', fontSize: '12px', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums'});
   rowTitle.append(titleEl, timeEl);
   // 設定（⚙ で開く）
@@ -264,7 +309,7 @@
   bar.append(row1, rowTitle, row2, row3);
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
-                     Object.assign({}, ctrl, {position: 'fixed', zIndex: '2147483647', right: '10px',
+                     Object.assign({}, tool, {position: 'fixed', zIndex: '2147483647', right: '10px',
                                               bottom: isMobile ? '60px' : '14px', opacity: '.85',
                                               boxShadow: '0 2px 8px rgba(0,0,0,.5)'}));
 
@@ -308,7 +353,7 @@
     save();
     // watch?list=ID だけ（v= なし）だと再生されないので、先頭の動画から開く
     const p = (settings.playlists || []).find(x => x.id === id);
-    if (p && p.vid) markAutoplay();
+    if (p && p.vid) markAutoplay(0);
     location.href = p && p.vid ? '/watch?v=' + p.vid + '&list=' + id : '/playlist?list=' + id;
   });
   refreshBtn.addEventListener('click', refresh);
@@ -320,7 +365,7 @@
     const p = player();
     if (!location.pathname.startsWith('/watch') || !p) {
       const u = resumeUrl();
-      if (u) { markAutoplay(); location.href = u; }
+      if (u) { markAutoplay(settings.last_time); location.href = u; }
       return;
     }
     if (p.getPlayerState() === 1) p.pauseVideo(); else p.playVideo();
@@ -331,35 +376,33 @@
   optBtn.addEventListener('click', () => { settings.showopts = !settings.showopts; save(); applyOpts(); });
   function applyOpts() { row3.style.display = settings.showopts ? 'flex' : 'none'; }
 
-  // 前回の動画のページがそのまま開かれたとき、プレイヤーの準備ができたら前回の位置まで進める
-  function seekToLast() {
-    if (!resumeSeek) return;
+  // 開いたページで再生を始め（wantPlay）、前回の位置まで進める（resumeSeek）。
+  // 進めるのは再生が始まってから（始まる前に進めても、Firefox では再生開始で先頭に戻ることがある）。広告の間は待つ。
+  // 利用者の一時停止とぶつからないよう、再生を試すのは 2 秒おきに 5 回まで。全体で 60 秒まで。
+  function startPlayback() {
+    if (!wantPlay && !resumeSeek) return;
     const started = Date.now();
+    let plays = 0, seeks = 0, last = 0;
     const timer = setInterval(() => {
-      const p = player();
-      if (Date.now() - started > 20000) { clearInterval(timer); resumeSeek = 0; return; }
+      const done = () => { clearInterval(timer); wantPlay = false; resumeSeek = 0; };
+      if (Date.now() - started > 60000) return done();
+      const p = player(), box = document.getElementById('movie_player');
       if (!p || !p.getDuration || !(p.getDuration() > 0)) return;
-      if (p.getCurrentTime() < resumeSeek - 5) p.seekTo(resumeSeek, true);
-      clearInterval(timer);
-      resumeSeek = 0;
-    }, 500);
-  }
-
-  // 開いたページで再生を始める（wantPlay のとき）。再生が始まったら終わり。
-  // 利用者の一時停止とぶつからないよう、試すのは 2 秒おきに数回、20 秒まで。
-  function startPlaying() {
-    if (!wantPlay) return;
-    const started = Date.now();
-    let tries = 0, last = 0;
-    const timer = setInterval(() => {
-      const p = player();
-      if (Date.now() - started > 20000 || tries >= 5) { clearInterval(timer); return; }
-      if (!p || !p.getDuration || !(p.getDuration() > 0) || resumeSeek) return;
+      if (box && box.classList.contains('ad-showing')) return;  // 広告の再生中
+      if (Date.now() - last < 2000) return;  // 直前に操作した
       const state = p.getPlayerState();
-      if (state === 1) { clearInterval(timer); return; }  // 再生中
-      if (state === 3 || Date.now() - last < 2000) return;  // 読み込み中 / 直前に試した
+      if (state === 1) {
+        if (resumeSeek && p.getCurrentTime() < resumeSeek - 5 && seeks < 5) {
+          last = Date.now();
+          seeks++;
+          p.seekTo(resumeSeek, true);
+          return;  // 2 秒後に、進んだか確かめる
+        }
+        return done();
+      }
+      if (!wantPlay || state === 3 || plays >= 5) return;  // 読み込み中など
       last = Date.now();
-      tries++;
+      plays++;
       p.playVideo();
     }, 500);
   }
@@ -399,9 +442,9 @@
       time = settings.last_time ? fmt(settings.last_time) + ' から' : '';
       titleEl.style.color = '#aaa';
     }
-    if (titleEl.textContent !== title) { titleEl.textContent = title; titleEl.title = title; }
-    timeEl.textContent = time;
     rowTitle.style.display = title ? 'flex' : 'none';
+    setTitle(title);
+    timeEl.textContent = time;
     // 再生中の URL と位置を覚える（「続きから」で使う）。YouTube は曲送りでページを読み直さないので URL を毎回見る。
     // 再生中のときだけ記録する。開いた直後（前回の位置へ進む前・自動再生が止められて始まっていないとき）に 0 秒で上書きしないため
     if (watching && id && !resumeSeek && p.getPlayerState() === 1 && Date.now() - lastSave > 5000) {
@@ -421,8 +464,7 @@
     document.documentElement.append(bar, openBtn);
     applyFold();
     applyOpts();
-    seekToLast();
-    startPlaying();
+    startPlayback();
     tick();
     setInterval(tick, 1000);
     // 前回の一覧をすぐ出し、裏で取り直して新しく作った・保存した再生リストも反映する
