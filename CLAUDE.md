@@ -13,6 +13,8 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
   ページ内のバーは `BAR_JS` を読み込み完了のたびに注入している。
 - `playlist_tools/add_titles.py` — URL 一覧に oEmbed でタイトルを追記する。
 - `playlist_tools/add_playlist.py` — テキストから Data API で再生リストを作る。
+- `android/ytplayer.user.js` — Firefox（Android）用のユーザースクリプト版。youtube.com にバーを足す。使い方は `android/README.md`。
+  一覧の取り方（内部 API）以外は本体と同じページの作りに頼っているので、本体側を直したらこちらも合わせる。バージョンは別（`@version` と `VERSION`）。
 - `tools/cdp.py`, `tools/win.ps1` — 動作確認用（下の「動作確認」）。
 - `make_icon.py` → `ytplayer.ico` / `ytplayer.png`。
 

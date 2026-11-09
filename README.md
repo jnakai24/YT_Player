@@ -25,6 +25,10 @@ python ytplayer.py
 - プレイヤー画面・ミニプレイヤーのどちらの × でもアプリが終了する。次回は終了した時の画面（プレイヤー画面なら最大化かどうかも）で起動する。
 - 二重に起動すると、すでに開いているウィンドウが前面に出るだけ。
 
+## スマホ（Android）で使う
+
+Firefox for Android ＋ Violentmonkey で動くユーザースクリプト版がある。入れ方は [android/README.md](android/README.md)。
+
 ## 再生リストの一覧
 
 プルダウンの一覧は、ログイン中のプレイヤーが YouTube の「再生リスト」ページ（`/feed/playlists`）を裏で読んで作る。
