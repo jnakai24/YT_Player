@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.6
+// @version      0.7
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.6';
+  const VERSION = '0.7';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -95,11 +95,20 @@
   // YouTube はページが見えなくなったこと（document.hidden / visibilitychange）を見て再生を止めるので、
   // ずっと見えていることにする。Premium の機能を回避する使い方なので、既定はオフ。
   // ページより先に仕込む必要があるため @run-at document-start。
+  // 「裏で再生」がオフのときは逆に、ページが見えなくなったら（別のアプリ・ホーム画面・最近のアプリ一覧に切り替えた、
+  // 画面を消した）スクリプトが一時停止する。Firefox のスマホ版 YouTube は、Premium などで止めないことがあるため。
+  const realHidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden').get;
+  function pauseIfHidden() {
+    if (settings.bg || !realHidden.call(document)) return;
+    const p = player();
+    if (p && p.getPlayerState() === 1) p.pauseVideo();
+  }
   (function installBackground() {
     for (const type of ['visibilitychange', 'webkitvisibilitychange']) {
-      window.addEventListener(type, e => { if (settings.bg) e.stopImmediatePropagation(); }, true);
+      window.addEventListener(type, e => { if (settings.bg) e.stopImmediatePropagation(); else pauseIfHidden(); }, true);
       document.addEventListener(type, e => { if (settings.bg) e.stopImmediatePropagation(); }, true);
     }
+    window.addEventListener('pagehide', pauseIfHidden, true);
     // YouTube が読む document.hidden などを上書きする（コンテンツスクリプトのときはページ側の document に）
     const doc = pageObj(document);
     const proto = Document.prototype;
