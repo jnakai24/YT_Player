@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.2
+// @version      0.3
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,11 +15,23 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.2';
+  const VERSION = '0.3';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
   const STORE = 'ytp-settings';
+
+  // ---- ページ側のものに触るための準備 ----
+  // Firefox の Violentmonkey は、サイトによってはスクリプトをページと切り離した場所（コンテンツスクリプト）で動かす。
+  // そこからは YouTube が要素に足したメソッド（#movie_player の nextVideo など）が見えないので、
+  // wrappedJSObject（ページ側の中身）を通して触る。ページ側に渡す関数は exportFunction で渡す。
+  // ページの中で動いているときはどちらもないので、そのまま使う。
+  const IN_CONTENT = typeof window.wrappedJSObject === 'object' && window.wrappedJSObject !== null;
+  const MODE = IN_CONTENT ? 'content' : 'page';
+  function pageObj(o) { return o && IN_CONTENT && o.wrappedJSObject ? o.wrappedJSObject : o; }
+  function pageFn(fn) {
+    return IN_CONTENT && typeof exportFunction === 'function' ? exportFunction(fn, window) : fn;
+  }
 
   // ---- 設定（youtube.com の localStorage に保存。この端末・このブラウザだけ） ----
   function load() {
@@ -67,23 +79,43 @@
       window.addEventListener(type, e => { if (settings.bg) e.stopImmediatePropagation(); }, true);
       document.addEventListener(type, e => { if (settings.bg) e.stopImmediatePropagation(); }, true);
     }
+    // YouTube が読む document.hidden などを上書きする（コンテンツスクリプトのときはページ側の document に）
+    const doc = pageObj(document);
     const proto = Document.prototype;
     for (const [prop, fake] of [['hidden', false], ['webkitHidden', false],
                                 ['visibilityState', 'visible'], ['webkitVisibilityState', 'visible']]) {
       const orig = Object.getOwnPropertyDescriptor(proto, prop);
       if (!orig || !orig.get) continue;
       try {
-        Object.defineProperty(document, prop, {
+        Object.defineProperty(doc, prop, {
           configurable: true,
-          get() { return settings.bg ? fake : orig.get.call(this); }
+          get: pageFn(function () { return settings.bg ? fake : orig.get.call(document); })
         });
       } catch (e) {}
     }
   })();
 
   function player() {
-    const p = document.getElementById('movie_player');
-    return p && p.getPlayerState ? p : null;
+    const p = pageObj(document.getElementById('movie_player'));
+    return p && typeof p.getPlayerState === 'function' ? p : null;
+  }
+  // 再生リストの次 / 前の動画へ。パソコン版はプレイヤー自身が再生リストを持っているので nextVideo / previousVideo でよいが、
+  // スマホ版はプレイヤーが再生リストを持たず（getPlaylist() が空で nextVideo が空振りする）、ページ側の一覧
+  // （ytm-playlist-panel-video-renderer）が順番を管理している。そこから今の動画の次 / 前の項目を探して開く。
+  function step(delta) {
+    const p = player();
+    const list = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
+    if (list && list.length) {
+      if (delta > 0) p.nextVideo(); else p.previousVideo();
+      return;
+    }
+    const v = new URL(location.href).searchParams.get('v');
+    const links = [...document.querySelectorAll('ytm-playlist-panel-video-renderer')]
+      .map(item => item.querySelector('a[href*="/watch"]')).filter(Boolean);
+    const i = links.findIndex(a => new URL(a.href, location.href).searchParams.get('v') === v);
+    const target = i >= 0 ? links[i + delta] : null;
+    if (target) target.click();
+    else if (p) { if (delta > 0) p.nextVideo(); else p.previousVideo(); }
   }
   function currentList() {
     try { return new URL(location.href).searchParams.get('list'); } catch (e) { return null; }
@@ -187,7 +219,9 @@
   const row3 = el('div', {}, {display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap'});
   row1.append(sel, refreshBtn, optBtn, foldBtn);
   row2.append(prevBtn, playBtn, nextBtn, resumeBtn, info);
-  row3.append(resumeLabel, bgLabel);
+  // 版と、スクリプトが動いている場所（page / content）。うまく動かないときの手がかり
+  const about = el('span', {textContent: 'v' + VERSION + ' · ' + MODE}, {color: '#888', fontSize: '12px', marginLeft: 'auto'});
+  row3.append(resumeLabel, bgLabel, about);
   bar.append(row1, row2, row3);
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
@@ -239,8 +273,8 @@
   refreshBtn.addEventListener('click', refresh);
   foldBtn.addEventListener('click', () => { settings.collapsed = true; save(); applyFold(); });
   openBtn.addEventListener('click', () => { settings.collapsed = false; save(); applyFold(); });
-  prevBtn.addEventListener('click', () => { const p = player(); if (p) p.previousVideo(); });
-  nextBtn.addEventListener('click', () => { const p = player(); if (p) p.nextVideo(); });
+  prevBtn.addEventListener('click', () => step(-1));
+  nextBtn.addEventListener('click', () => step(1));
   playBtn.addEventListener('click', () => {
     const p = player();
     if (!p) return;
@@ -269,10 +303,11 @@
 
   // ロック画面・通知の「前へ」「次へ」も再生リストの曲送りにする
   function setMediaSession() {
-    if (!('mediaSession' in navigator)) return;
+    const ms = pageObj(navigator).mediaSession;
+    if (!ms) return;
     try {
-      navigator.mediaSession.setActionHandler('previoustrack', () => { const p = player(); if (p) p.previousVideo(); });
-      navigator.mediaSession.setActionHandler('nexttrack', () => { const p = player(); if (p) p.nextVideo(); });
+      ms.setActionHandler('previoustrack', pageFn(() => step(-1)));
+      ms.setActionHandler('nexttrack', pageFn(() => step(1)));
     } catch (e) {}
   }
 

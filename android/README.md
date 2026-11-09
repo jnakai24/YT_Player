@@ -48,6 +48,13 @@ Windows 版 YT Player の機能を、スマホの Firefox で youtube.com を開
 - 長時間でも止まりにくくするには、Android の設定 → アプリ → Firefox →「電池」で制限なし（最適化しない）にする。
 - 切り替えは、ページを開いた時点から効く。オンにしても止まるときは、ページを開き直す。
 
+## うまく動かないとき
+
+- ⚙ を押した行の右端に `v0.3 · page` のように、版とスクリプトが動いている場所が出る。
+  - `page`：ページの中で動いている（普通の状態）。
+  - `content`：Violentmonkey がページと切り離した場所で動かしている（Firefox でサイトの守りが固いとき）。0.3 からはこちらでも操作できるようにしてある。
+- 版が古いまま：Violentmonkey のダッシュボードで「更新を確認」、または入れたときの URL をもう一度開いて「インストール」。
+
 ## 壊れたとき
 
 YouTube のページの作りに頼っているので、YouTube 側の変更で動かなくなることがある（Windows 版と同じ。ルートの CLAUDE.md を参照）。
@@ -62,4 +69,8 @@ YouTube のページの作りに頼っているので、YouTube 側の変更で�
   `SAPISIDHASH` の Authorization ヘッダーを付けて問い合わせている。スマホ版の名乗り（`MWEB`）だと中身が空なので、パソコン版（`WEB`）で問い合わせる。
   結果の `lockupViewModel` の読み方は Windows 版の `PAGE_PLAYLISTS_JS` と同じ（2026-11-10 に両方の結果が一致することを確認）。
 - プレイヤー操作は Windows 版と同じ `#movie_player` のメソッド。m.youtube.com にも同じものがある。
+  ただし m.youtube.com ではプレイヤーが再生リストを持たない（`getPlaylist()` が空で `nextVideo()` が空振りする）ので、
+  前 / 次はページの再生リストの一覧（`ytm-playlist-panel-video-renderer`）から今の動画の前後の項目を探してクリックする。
+- Violentmonkey がコンテンツスクリプトとして動かしたときは、ページ側のメソッドが見えないので `wrappedJSObject` を通して触り、
+  ページに渡す関数は `exportFunction` で渡す（`pageObj()` / `pageFn()`）。
 - 「裏で再生」は `document.hidden` / `visibilityState` を上書きし、`visibilitychange` を止めている。ページより先に仕込むため `@run-at document-start`。
