@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.9
+// @version      0.10
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.9';
+  const VERSION = '0.10';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -120,14 +120,9 @@
       }, true);
       document.addEventListener(type, e => { if (settings.bg) e.stopImmediatePropagation(); }, true);
     }
-    // Firefox を最近のアプリ一覧から消すと、ページは動き続けたまま pagehide だけが届く（0.8 の記録で確認）。
-    // 「閉じたら止める」がオン（既定）なら、そこで一時停止する。裏に回す・画面を消すでは届かない見込み。
-    window.addEventListener('pagehide', e => {
-      log('pagehide' + (e.persisted ? '（保存）' : ''));
-      if (settings.stoponclose === false) return;
-      const p = player();
-      if (p && p.getPlayerState() === 1) { p.pauseVideo(); log('一時停止（pagehide）'); }
-    }, true);
+    // Firefox を最近のアプリ一覧から消しても、再生中はページが動き続け、何も届かない（0.9 の記録で確認）。
+    // そのため「Firefox を閉じたら止める」はスクリプトからはできない。止めるのは通知・ロック画面の一時停止で。
+    window.addEventListener('pagehide', e => log('pagehide' + (e.persisted ? '（保存）' : '')), true);
     window.addEventListener('pageshow', e => { if (e.persisted) log('pageshow（復帰）'); }, true);
     window.addEventListener('beforeunload', () => log('beforeunload'), true);
     document.addEventListener('freeze', () => log('freeze'), true);
@@ -298,7 +293,6 @@
   }
   const [resumeLabel, resumeBox] = checkbox('開いたら続きから', 'YouTube のトップを開いたら、前回の動画の続きから再生する');
   const [bgLabel, bgBox] = checkbox('裏で再生', '画面を消したり別のアプリに切り替えたりしても再生を続ける');
-  const [closeLabel, closeBox] = checkbox('閉じたら止める', 'Firefox を最近のアプリ一覧から消したら一時停止する');
   const info = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', textOverflow: 'ellipsis',
                                whiteSpace: 'nowrap', color: '#aaa', fontSize: '12px', textAlign: 'right'});
   // 再生中の動画のタイトルと再生位置。動画を見ていないときは前回の動画（▶ で続きから流れるもの）
@@ -350,7 +344,7 @@
   const about = el('span', {textContent: 'v' + VERSION + ' · ' + MODE}, {color: '#888', fontSize: '12px', marginLeft: 'auto'});
   // 裏に回ったときに何が届いたかの記録（新しいものが下）
   const logEl = el('div', {}, {width: '100%', color: '#888', fontSize: '11px', whiteSpace: 'pre-wrap', lineHeight: '1.4'});
-  row3.append(resumeLabel, bgLabel, closeLabel, about, logEl);
+  row3.append(resumeLabel, bgLabel, about, logEl);
   bar.append(row1, rowTitle, row2, row3);
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
@@ -417,7 +411,6 @@
     setTimeout(tick, 300);
   });
   bgBox.addEventListener('change', () => { settings.bg = bgBox.checked; save(); });
-  closeBox.addEventListener('change', () => { settings.stoponclose = closeBox.checked; save(); });
   resumeBox.addEventListener('change', () => { settings.autoresume = resumeBox.checked; save(); });
   optBtn.addEventListener('click', () => { settings.showopts = !settings.showopts; save(); applyOpts(); });
   function applyOpts() { row3.style.display = settings.showopts ? 'flex' : 'none'; showLog(); }
@@ -513,7 +506,6 @@
 
   function start() {
     bgBox.checked = !!settings.bg;
-    closeBox.checked = settings.stoponclose !== false;
     resumeBox.checked = settings.autoresume !== false;
     fill(settings.playlists, currentList() || settings.last_playlist);
     document.documentElement.append(bar, openBtn);
