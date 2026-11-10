@@ -26,17 +26,29 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 
 ## バージョン
 
-- `ytplayer.py` の `VERSION`（現在 0.1）がウィンドウタイトルに出る（`YT Player v0.1` / `YT Player mini v0.1`）。
+- `ytplayer.py` の `VERSION`（現在 0.2）がウィンドウタイトルに出る（`YT Player v0.2` / `YT Player mini v0.2`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.10）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.10 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.11）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.11 · page` と出る。
 
 ## YouTube のページに頼っている部分（壊れやすい）
 
 - **再生リストの一覧**は `/feed/playlists` を `fetch` して `ytInitialData` の `lockupViewModel` を読んでいる（`PAGE_PLAYLISTS_JS`）。
   Data API には「保存した再生リスト」「後で見る」「ミックスリスト」などを取る手段がない（`mine=true` / `channelId` では取れない）。
-  読めないときは Data API の `playlists.list?mine=true` に切り替わる。最初の約 30 件しか読んでいない（続きは未対応）。
+  読めないときは Data API の `playlists.list?mine=true` に切り替わる。
+- **一覧の続き**（最初の約 30 件より先）は、一覧の末尾の `continuationItemRenderer` にある token を、内部 API `/youtubei/v1/browse` に
+  `{context, continuation: token}` で POST して読む（`Authorization: SAPISIDHASH …` が要る。context は `ytcfg.get('INNERTUBE_CONTEXT')`）。
+  絞り込みのボタンにも `continuationCommand` があるので、`continuationItemRenderer` の中だけを見る。続きが読めなくても読めたところまでは使う（バーに ⚠ が出る）。
+- **シャッフル・リピート**は YouTube のページのボタンを使わず、自前でやる（`checkEnd()`）。曲の終わりの 1.2 秒前（`timeupdate` と 250ms のタイマー）に、
+  `seekTo(0)`（1 曲リピート）か、別の曲へ移る。曲の一覧は `#movie_player` の `getPlaylist()`、移動は `playVideoAt(i)`。
+  プレイヤーが一覧を持たないとき（スマホ版）はページの一覧（`ytm-` / `ytd-playlist-panel-video-renderer`）のリンクを押す。
+  広告の間（`ad-showing`）とライブ配信（`getVideoData().isLive`）では何もしない。モードは Python の settings（`shuffle` / `repeat`）にあり、
+  ミニプレイヤーからは `set_play_mode` → `window.__ytp.setMode()` でページに伝える。ミニの ⏮ ⏭ も `window.__ytp.step()` を通る。
+- **自己診断**（バー・ミニの「診断」、Firefox 版は ⚙ の中）：上の頼っている部分が使えるかを確かめる（`Api.diagnose()` / `DIAG_JS`、Firefox 版は `diagnose()`）。
+  頼る部分を増やしたら、診断の項目にも足す。
+- **再生リストごとの位置**：settings の `positions[再生リスト ID] = {url, time, at}`（Firefox 版は localStorage `ytp-settings` の同じ名前）。
+  再生リストを選ぶと、あればその続きから開く。200 件（Firefox 版は 100 件）を超えたら古いものから捨てる。
 - **プレイヤー操作**は youtube.com の `#movie_player` 要素のメソッド（`playVideo` / `pauseVideo` / `nextVideo` / `previousVideo` / `getPlayerState` / `getCurrentTime` / `getDuration` / `getVideoData`）。
   公式 IFrame Player API と同じ名前だが、youtube.com 上で呼ぶのは文書化されていない使い方。`getVideoData` は IFrame API でも非公開。
 - `watch?list=ID` だけ（`v=` なし）で開くと「この端末では利用できません」になる。必ず `watch?v=<先頭の動画>&list=ID` で開く。

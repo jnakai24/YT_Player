@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.10
+// @version      0.11
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.10';
+  const VERSION = '0.11';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -164,6 +164,14 @@
   // そのときは押された操作を覚えておき、一覧ができたら送る（最大 10 秒。過ぎたらプレイヤーに頼む）。
   let pendingStep = null;
   function step(delta) {
+    if (settings.shuffle && currentList()) {
+      // シャッフル中：⏭ はまだ流していない曲へ、⏮ は直前に流した曲へ
+      if (delta > 0) { if (jumpRandom()) return; }
+      else if (history.length) {
+        const it = items(), i = it.ids.indexOf(history.pop());
+        if (i >= 0) { go(it, i); return; }
+      }
+    }
     pendingStep = {delta: delta, until: Date.now() + 10000};
     tryStep();
   }
@@ -177,9 +185,8 @@
       if (delta > 0) p.nextVideo(); else p.previousVideo();
       return;
     }
-    const v = new URL(location.href).searchParams.get('v');
-    const links = [...document.querySelectorAll('ytm-playlist-panel-video-renderer')]
-      .map(item => item.querySelector('a[href*="/watch"]')).filter(Boolean);
+    const v = currentVideo();
+    const links = panelLinks();
     const i = links.findIndex(a => new URL(a.href, location.href).searchParams.get('v') === v);
     if (i >= 0) {
       pendingStep = null;
@@ -193,6 +200,68 @@
       if (p) { if (delta > 0) p.nextVideo(); else p.previousVideo(); }
     }
   }
+  function panelLinks() {
+    return [...document.querySelectorAll('ytm-playlist-panel-video-renderer, ytd-playlist-panel-video-renderer')]
+      .map(item => item.querySelector('a[href*="/watch"]')).filter(Boolean);
+  }
+  function currentVideo() {
+    try { return new URL(location.href).searchParams.get('v'); } catch (e) { return null; }
+  }
+  function adShowing() {
+    const box = document.getElementById('movie_player');
+    return !!box && box.classList.contains('ad-showing');
+  }
+
+  // ---- シャッフル・リピート ----
+  // YouTube のページのボタンには頼らず、曲の終わり（残り約 1 秒）で自分で次の曲へ移す。
+  // 曲の一覧は、パソコン版はプレイヤーが持っている（getPlaylist / playVideoAt）。スマホ版はページ側の一覧のリンクを押す。
+  // スマホ版の一覧は長い再生リストだと途中までしか読み込まれていないことがある。そのときは読み込まれている範囲で選ぶ。
+  let played = [], history = [], playedList = null, jumpedAt = 0;
+  function items() {
+    const p = player();
+    const ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
+    if (ids && ids.length) return {source: 'player', ids: Array.from(ids), go: i => p.playVideoAt(i)};
+    const links = panelLinks();
+    return {source: 'page', ids: links.map(a => new URL(a.href, location.href).searchParams.get('v')),
+            go: i => links[i].click()};
+  }
+  function go(it, i) { jumpedAt = Date.now(); pendingStep = null; it.go(i); }
+  // まだ流していない曲から選ぶ。一巡したらやり直す
+  function jumpRandom() {
+    const it = items(), cur = currentVideo(), list = currentList();
+    if (it.ids.length < 2) return false;
+    if (playedList !== list) { playedList = list; played = []; history = []; }
+    if (cur && !played.includes(cur)) played.push(cur);
+    let rest = it.ids.map((v, i) => i).filter(i => !played.includes(it.ids[i]));
+    if (!rest.length) {
+      played = cur ? [cur] : [];
+      rest = it.ids.map((v, i) => i).filter(i => it.ids[i] !== cur);
+    }
+    if (cur) history.push(cur);
+    go(it, rest[Math.floor(Math.random() * rest.length)]);
+    return true;
+  }
+  function repeatMode() { return settings.repeat === 'all' || settings.repeat === 'one' ? settings.repeat : 'off'; }
+  function checkEnd() {
+    const repeat = repeatMode();
+    if (!settings.shuffle && repeat === 'off') return;
+    const p = player();
+    if (!p || !location.pathname.startsWith('/watch') || adShowing() || Date.now() - jumpedAt < 3000) return;
+    const d = p.getDuration(), t = p.getCurrentTime();
+    if (!(d > 0) || p.getPlayerState() !== 1 || d - t > 1.2) return;
+    const data = p.getVideoData ? p.getVideoData() : null;
+    if (data && data.isLive) return;  // ライブ配信はいつも「終わりの直前」に見える
+    if (repeat === 'one') { jumpedAt = Date.now(); p.seekTo(0, true); return; }
+    if (!currentList()) return;
+    if (settings.shuffle) { jumpRandom(); return; }
+    // 全曲リピート：最後の曲なら先頭へ。一覧が途中までしか読み込まれていないことがあるので、本数と比べる
+    const it = items(), i = it.ids.indexOf(currentVideo());
+    const pl = (settings.playlists || []).find(x => x.id === currentList());
+    const total = pl ? Number(String(pl.count).replace(/,/g, '')) : NaN;
+    if (i >= 0 && i === it.ids.length - 1 && !(total > it.ids.length)) go(it, 0);
+  }
+  document.addEventListener('timeupdate', checkEnd, true);
+  setInterval(checkEnd, 250);
   function currentList() {
     try { return new URL(location.href).searchParams.get('list'); } catch (e) { return null; }
   }
@@ -206,8 +275,9 @@
   // YouTube の「再生リスト」ページと同じ一覧（保存した再生リスト・後で見る・ミックスリストも）。
   // m.youtube.com からはパソコン版のページを読めない（別のサイト扱い）ので、YouTube 自身が使っている
   // 内部 API（/youtubei/v1/browse、FEplaylist_aggregation）にログイン中の Cookie で問い合わせる。
-  function collect(root) {
-    const out = [];
+  // 再生リスト（lockupViewModel）を out に集め、続きを読むための合言葉（continuationItemRenderer の token）を返す
+  function collect(root, out, seen) {
+    let token = null;
     (function walk(o) {
       if (!o || typeof o !== 'object') return;
       if (o.lockupViewModel) {
@@ -217,18 +287,28 @@
         const badge = (s.match(/"text":"([^"]*?(?:本の動画|エピソード|レッスン|ミックスリスト|videos?|episodes?|lessons?|Mix)[^"]*)"/) || [])[1];
         const vid = (s.match(/"watchEndpoint":\{"videoId":"([\w-]{11})"/) || [])[1];
         const n = badge && badge.match(/^([\d,]+) 本の動画$/);
-        if (l.contentId && title) out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null});
+        if (l.contentId && title && !seen.has(l.contentId)) {
+          seen.add(l.contentId);
+          out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null});
+        }
+        return;
+      }
+      if (o.continuationItemRenderer) {
+        // 絞り込みのボタンなどにも continuationCommand があるので、一覧の末尾のもの（continuationItemRenderer）だけを見る
+        const t = (JSON.stringify(o.continuationItemRenderer).match(/"continuationCommand":\{[^{}]*?"token":"([^"]+)"/) || [])[1];
+        if (t && !token) token = t;
         return;
       }
       for (const k in o) walk(o[k]);
     })(root);
-    return out;
+    return token;
   }
   async function sha1(text) {
     const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(text));
     return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
   }
-  async function fetchPlaylists() {
+  function loggedIn() { return /(^|; )(SAPISID|__Secure-3PAPISID)=/.test(document.cookie); }
+  async function browse(body) {
     const cookies = {};
     for (const c of document.cookie.split('; ')) cookies[c.slice(0, c.indexOf('='))] = c.slice(c.indexOf('=') + 1);
     const sapisid = cookies.SAPISID || cookies['__Secure-3PAPISID'];
@@ -239,15 +319,75 @@
       method: 'POST', credentials: 'include',
       headers: {'Content-Type': 'application/json', 'Authorization': auth,
                 'X-Origin': location.origin, 'X-Goog-AuthUser': '0'},
-      body: JSON.stringify({
-        context: {client: {clientName: 'WEB', clientVersion: WEB_CLIENT_VERSION, hl: 'ja', gl: 'JP'}},
-        browseId: 'FEplaylist_aggregation'
-      })
+      body: JSON.stringify(Object.assign({
+        context: {client: {clientName: 'WEB', clientVersion: WEB_CLIENT_VERSION, hl: 'ja', gl: 'JP'}}
+      }, body))
     });
     if (!r.ok) throw new Error('再生リストを読めませんでした（' + r.status + '）');
-    const items = collect(await r.json());
-    if (!items.length) throw new Error('再生リストが見つかりませんでした');
-    return items;
+    return r.json();
+  }
+  // 一覧をどう取れたか（診断で出す）
+  let listInfo = null;
+  async function fetchPlaylists() {
+    const out = [], seen = new Set();
+    let token, pages = 0, warn = null;
+    try {
+      token = collect(await browse({browseId: 'FEplaylist_aggregation'}), out, seen);
+    } catch (e) {
+      listInfo = {error: e.message};
+      throw e;
+    }
+    if (!out.length) {
+      listInfo = {error: '再生リストが見つかりませんでした'};
+      throw new Error(listInfo.error);
+    }
+    // 最初の約 30 件より先。続きが読めなくても、読めたところまでは使う
+    try {
+      while (token && pages < 30) {
+        const before = out.length;
+        token = collect(await browse({continuation: token}), out, seen);
+        pages++;
+        if (out.length === before) break;
+      }
+    } catch (e) {
+      warn = e.message;
+    }
+    listInfo = {count: out.length, pages: pages, warn: warn};
+    return out;
+  }
+
+  // ---- 自己診断 ----
+  // YouTube のページに頼っている部分が今も動くかを確かめる。[項目, 結果(true / false / null = 確かめられない), 説明]
+  async function diagnose() {
+    const out = [['版', null, 'v' + VERSION + ' · ' + MODE + ' · ' + location.hostname]];
+    out.push(['ログイン', loggedIn(), loggedIn() ? 'ログイン中' : 'YouTube にログインしていません']);
+    try { await fetchPlaylists(); } catch (e) {}
+    const li = listInfo || {};
+    if (li.error) out.push(['再生リストの一覧', false, li.error + '（clientVersion ' + WEB_CLIENT_VERSION + '）']);
+    else if (li.warn) out.push(['再生リストの一覧', false, li.count + ' 件まで。続きを読めません: ' + li.warn]);
+    else out.push(['再生リストの一覧', true, li.count + ' 件（続きを ' + li.pages + ' 回読み込み）']);
+    const p = player(), watch = location.pathname.startsWith('/watch');
+    if (!watch) {
+      out.push(['プレイヤー', null, '動画を開いていないので確かめられません']);
+    } else {
+      const raw = pageObj(document.getElementById('movie_player'));
+      const need = ['playVideo', 'pauseVideo', 'seekTo', 'getPlayerState', 'getCurrentTime', 'getDuration', 'getVideoData']
+        .concat(isMobile ? [] : ['nextVideo', 'previousVideo', 'getPlaylist', 'playVideoAt']);
+      const miss = need.filter(n => !raw || typeof raw[n] !== 'function');
+      out.push(['プレイヤー', !miss.length,
+                !raw ? '#movie_player が見つかりません' : miss.length ? '使えない操作: ' + miss.join(', ') : '操作 ' + need.length + ' 種類すべて使えます']);
+      const d = p && p.getVideoData ? p.getVideoData() : null;
+      out.push(['曲名', !!(d && d.title), d && d.title ? '取得できます' : 'getVideoData() から曲名を取れません']);
+      if (!currentList()) {
+        out.push(['曲の一覧', null, '再生リストを再生していないので確かめられません']);
+      } else {
+        const it = items();
+        out.push(['曲の一覧', it.ids.length > 0,
+                  it.ids.length ? it.ids.length + ' 曲（' + (it.source === 'player' ? 'プレイヤーから' : 'ページの一覧から') + '）'
+                                : '読めません（曲送り・シャッフル・全曲リピートが効きません）']);
+      }
+    }
+    return out;
   }
 
   // ---- バー ----
@@ -263,7 +403,7 @@
                 cursor: 'pointer'};
   // スマホでは押しやすいよう大きくする。⏮ ⏯ ⏭ はさらに大きく
   const tool = isMobile ? Object.assign({}, ctrl, {padding: '10px 0', minWidth: '52px', fontSize: '20px', lineHeight: '1'}) : ctrl;
-  const big = isMobile ? Object.assign({}, ctrl, {padding: '12px 0', minWidth: '80px', fontSize: '26px', lineHeight: '1'}) : ctrl;
+  const big = isMobile ? Object.assign({}, ctrl, {padding: '12px 0', minWidth: '64px', fontSize: '26px', lineHeight: '1'}) : ctrl;
   const bar = el('div', {id: 'ytp-bar'}, {
     position: 'fixed', zIndex: '2147483647', boxSizing: 'border-box',
     // スマホ版は画面下に YouTube のメニューがあるので、その上に置く
@@ -284,6 +424,17 @@
   // 動画を見ていないとき（トップ・検索・再生リストのページなど）は、前回の動画を止めた位置から再生する
   const playBtn = el('button', {textContent: '▶︎', title: '再生 / 一時停止（動画を見ていないときは前回の続きから）'}, big);
   const nextBtn = el('button', {textContent: '⏭︎', title: '次の動画'}, big);
+  const shuffleBtn = el('button', {textContent: '🔀︎'}, tool);
+  const repeatBtn = el('button', {textContent: '🔁︎'}, tool);
+  function paintMode() {
+    const on = {background: '#3d5a80', borderColor: '#7fb2ff'}, off = {background: '#272727', borderColor: '#444'};
+    const repeat = repeatMode();
+    Object.assign(shuffleBtn.style, settings.shuffle ? on : off);
+    Object.assign(repeatBtn.style, repeat !== 'off' ? on : off);
+    shuffleBtn.title = 'シャッフル: ' + (settings.shuffle ? 'オン' : 'オフ');
+    repeatBtn.textContent = repeat === 'one' ? '🔂︎' : '🔁︎';
+    repeatBtn.title = 'リピート: ' + ({off: 'オフ', all: '再生リスト全体', one: '1 曲'})[repeat];
+  }
   function checkbox(text, title) {
     const label = el('label', {title: title},
                      {display: 'flex', gap: '4px', alignItems: 'center', cursor: 'pointer', whiteSpace: 'nowrap'});
@@ -293,8 +444,9 @@
   }
   const [resumeLabel, resumeBox] = checkbox('開いたら続きから', 'YouTube のトップを開いたら、前回の動画の続きから再生する');
   const [bgLabel, bgBox] = checkbox('裏で再生', '画面を消したり別のアプリに切り替えたりしても再生を続ける');
-  const info = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', textOverflow: 'ellipsis',
-                               whiteSpace: 'nowrap', color: '#aaa', fontSize: '12px', textAlign: 'right'});
+  // 知らせ（取得中・エラーなど）。あるときだけ 1 行使う
+  const info = el('div', {}, {overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              color: '#aaa', fontSize: '12px', display: 'none'});
   // 再生中の動画のタイトルと再生位置。動画を見ていないときは前回の動画（▶ で続きから流れるもの）
   const rowTitle = el('div', {}, {display: 'flex', gap: '8px', alignItems: 'baseline', fontSize: '13px'});
   const titleEl = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', whiteSpace: 'nowrap'});
@@ -339,13 +491,16 @@
   // 設定（⚙ で開く）
   const row3 = el('div', {}, {display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap'});
   row1.append(sel, refreshBtn, optBtn, foldBtn);
-  row2.append(prevBtn, playBtn, nextBtn, info);
+  row2.append(prevBtn, playBtn, nextBtn, el('span', {}, {flex: '1'}), shuffleBtn, repeatBtn);
   // 版と、スクリプトが動いている場所（page / content）。うまく動かないときの手がかり
   const about = el('span', {textContent: 'v' + VERSION + ' · ' + MODE}, {color: '#888', fontSize: '12px', marginLeft: 'auto'});
   // 裏に回ったときに何が届いたかの記録（新しいものが下）
   const logEl = el('div', {}, {width: '100%', color: '#888', fontSize: '11px', whiteSpace: 'pre-wrap', lineHeight: '1.4'});
-  row3.append(resumeLabel, bgLabel, about, logEl);
-  bar.append(row1, rowTitle, row2, row3);
+  const diagBtn = el('button', {textContent: '診断', title: 'YouTube のページに頼っている部分が動いているか確かめる'},
+                     Object.assign({}, ctrl, {fontSize: '12px'}));
+  const diagEl = el('div', {}, {width: '100%', fontSize: '12px', lineHeight: '1.5', display: 'none'});
+  row3.append(resumeLabel, bgLabel, diagBtn, about, diagEl, logEl);
+  bar.append(row1, rowTitle, row2, info, row3);
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
                      Object.assign({}, tool, {position: 'fixed', zIndex: '2147483647', right: '10px',
@@ -358,6 +513,7 @@
     info.textContent = message;
     info.title = message;
     info.style.color = isError ? '#f88' : '#aaa';
+    info.style.display = message ? 'block' : 'none';
   }
   function fill(list, selected) {
     sel.replaceChildren(el('option', {value: '', textContent: '— 再生リスト —'}));
@@ -377,7 +533,8 @@
       settings.playlists = await fetchPlaylists();
       save();
       fill(settings.playlists, currentList() || sel.value);
-      showMessage('');
+      if (listInfo && listInfo.warn) showMessage('⚠ 一覧の続きを読めませんでした（' + listInfo.count + ' 件まで）', true);
+      else showMessage('');
     } catch (e) {
       showMessage(e.message, true);
     }
@@ -386,6 +543,17 @@
     const id = sel.value;
     if (!id) return;
     settings.last_playlist = id;
+    // 前にこの再生リストを聴いていたら、その続きから
+    const pos = (settings.positions || {})[id];
+    if (pos && pos.url) {
+      settings.last_url = pos.url;
+      settings.last_time = pos.time || 0;
+      settings.last_title = pos.title || '';
+      save();
+      markAutoplay(settings.last_time);
+      location.href = resumeUrl();
+      return;
+    }
     delete settings.last_url;
     delete settings.last_time;
     delete settings.last_title;
@@ -410,6 +578,27 @@
     if (p.getPlayerState() === 1) p.pauseVideo(); else p.playVideo();
     setTimeout(tick, 300);
   });
+  shuffleBtn.addEventListener('click', () => { settings.shuffle = !settings.shuffle; save(); paintMode(); });
+  repeatBtn.addEventListener('click', () => {
+    settings.repeat = ({off: 'all', all: 'one', one: 'off'})[repeatMode()];
+    save();
+    paintMode();
+  });
+  diagBtn.addEventListener('click', async () => {
+    if (diagEl.style.display !== 'none') { diagEl.style.display = 'none'; return; }
+    diagEl.replaceChildren(document.createTextNode('確かめています…'));
+    diagEl.style.display = 'block';
+    const lines = await diagnose();
+    diagEl.replaceChildren();
+    for (const [name, ok, text] of lines) {
+      const line = el('div');
+      line.append(el('span', {textContent: ok === true ? '✓ ' : ok === false ? '✗ ' : '– '},
+                     {color: ok === true ? '#7d7' : ok === false ? '#f88' : '#aaa'}),
+                  el('b', {textContent: name + '  '}),
+                  el('span', {textContent: text || ''}, {color: ok === false ? '#f88' : '#ccc'}));
+      diagEl.append(line);
+    }
+  });
   bgBox.addEventListener('change', () => { settings.bg = bgBox.checked; save(); });
   resumeBox.addEventListener('change', () => { settings.autoresume = resumeBox.checked; save(); });
   optBtn.addEventListener('click', () => { settings.showopts = !settings.showopts; save(); applyOpts(); });
@@ -432,9 +621,9 @@
     const timer = setInterval(() => {
       const done = () => { clearInterval(timer); wantPlay = false; resumeSeek = 0; };
       if (Date.now() - started > 60000) return done();
-      const p = player(), box = document.getElementById('movie_player');
+      const p = player();
       if (!p || !p.getDuration || !(p.getDuration() > 0)) return;
-      if (box && box.classList.contains('ad-showing')) return;  // 広告の再生中
+      if (adShowing()) return;  // 広告の再生中
       if (Date.now() - last < 2000) return;  // 直前に操作した
       const state = p.getPlayerState();
       if (state === 1) {
@@ -494,11 +683,19 @@
     timeEl.textContent = time;
     // 再生中の URL と位置を覚える（「続きから」で使う）。YouTube は曲送りでページを読み直さないので URL を毎回見る。
     // 再生中のときだけ記録する。開いた直後（前回の位置へ進む前・自動再生が止められて始まっていないとき）に 0 秒で上書きしないため
-    if (watching && id && !resumeSeek && p.getPlayerState() === 1 && Date.now() - lastSave > 5000) {
+    if (watching && id && !resumeSeek && !adShowing() && p.getPlayerState() === 1 && Date.now() - lastSave > 5000) {
       lastSave = Date.now();
       settings.last_url = location.href;
       settings.last_time = Math.floor(p.getCurrentTime());
       if (title && title !== 'YouTube') settings.last_title = title;
+      // 再生リストごとにも覚える（別の再生リストから戻ってきたときに続きから流す）。古いものから捨てる
+      const positions = settings.positions = settings.positions || {};
+      positions[id] = {url: settings.last_url, time: settings.last_time, title: settings.last_title || '', at: Date.now()};
+      const keys = Object.keys(positions);
+      if (keys.length > 100) {
+        keys.sort((a, b) => (positions[a].at || 0) - (positions[b].at || 0));
+        for (const k of keys.slice(0, keys.length - 100)) delete positions[k];
+      }
       save();
       setMediaSession();
     }
@@ -507,6 +704,7 @@
   function start() {
     bgBox.checked = !!settings.bg;
     resumeBox.checked = settings.autoresume !== false;
+    paintMode();
     fill(settings.playlists, currentList() || settings.last_playlist);
     document.documentElement.append(bar, openBtn);
     applyFold();

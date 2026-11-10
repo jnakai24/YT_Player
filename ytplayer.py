@@ -24,7 +24,7 @@ TOKEN_FILE = DATA_DIR / "token.json"
 CLIENT_SECRET_FILE = APP_DIR / "client_secret.json"
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
-VERSION = "0.1"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
+VERSION = "0.2"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
 MAIN_TITLE = f"YT Player v{VERSION}"
 MINI_TITLE = f"YT Player mini v{VERSION}"
 ICON_FILE = APP_DIR / "ytplayer.ico"
@@ -51,14 +51,13 @@ def save_settings(settings):
     SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def resume_url(settings):
-    """前回の動画を、止めた位置（t=秒）から開く URL。"""
-    url = settings.get("last_url")
+def resume_url(url, seconds):
+    """動画を、止めた位置（t=秒）から開く URL。"""
     if not url:
         return None
     parts = urlparse(url)
     query = [(k, v) for k, v in parse_qsl(parts.query) if k not in ("t", "pp")]
-    seconds = int(settings.get("last_time") or 0)
+    seconds = int(seconds or 0)
     if seconds > 5:
         query.append(("t", f"{seconds}s"))
     return urlunparse(parts._replace(query=urlencode(query)))
@@ -134,24 +133,105 @@ PAGE_PLAYLISTS_JS = r"""
   const html = await (await fetch('/feed/playlists', {credentials: 'include'})).text();
   const m = html.match(/var ytInitialData = (\{.*?\});<\/script>/s);
   if (!m) throw new Error('再生リストのページを読めませんでした');
-  const out = [];
-  (function walk(o) {
-    if (!o || typeof o !== 'object') return;
-    if (o.lockupViewModel) {
-      const l = o.lockupViewModel, s = JSON.stringify(l);
-      const title = l.metadata && l.metadata.lockupMetadataViewModel
-                    && l.metadata.lockupMetadataViewModel.title.content;
-      const badge = (s.match(/"text":"([^"]*?(?:本の動画|エピソード|レッスン|ミックスリスト|videos?|episodes?|lessons?|Mix)[^"]*)"/) || [])[1];
-      const vid = (s.match(/"watchEndpoint":\{"videoId":"([\w-]{11})"/) || [])[1];
-      const n = badge && badge.match(/^([\d,]+) 本の動画$/);
-      if (l.contentId && title) out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null});
-      return;
+  const out = [], seen = new Set();
+  // 再生リスト（lockupViewModel）を out に集め、続きを読むための合言葉（continuationItemRenderer の token）を返す
+  function collect(root) {
+    let token = null;
+    (function walk(o) {
+      if (!o || typeof o !== 'object') return;
+      if (o.lockupViewModel) {
+        const l = o.lockupViewModel, s = JSON.stringify(l);
+        const title = l.metadata && l.metadata.lockupMetadataViewModel
+                      && l.metadata.lockupMetadataViewModel.title.content;
+        const badge = (s.match(/"text":"([^"]*?(?:本の動画|エピソード|レッスン|ミックスリスト|videos?|episodes?|lessons?|Mix)[^"]*)"/) || [])[1];
+        const vid = (s.match(/"watchEndpoint":\{"videoId":"([\w-]{11})"/) || [])[1];
+        const n = badge && badge.match(/^([\d,]+) 本の動画$/);
+        if (l.contentId && title && !seen.has(l.contentId)) {
+          seen.add(l.contentId);
+          out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null});
+        }
+        return;
+      }
+      if (o.continuationItemRenderer) {
+        // 絞り込みのボタンなどにも continuationCommand があるので、一覧の末尾のもの（continuationItemRenderer）だけを見る
+        const t = (JSON.stringify(o.continuationItemRenderer).match(/"continuationCommand":\{[^{}]*?"token":"([^"]+)"/) || [])[1];
+        if (t && !token) token = t;
+        return;
+      }
+      for (const k in o) walk(o[k]);
+    })(root);
+    return token;
+  }
+  // 続きは YouTube の内部 API（/youtubei/v1/browse）に、ログイン中の Cookie と SAPISIDHASH を付けて問い合わせる
+  async function more(token) {
+    const cfg = window.ytcfg && window.ytcfg.get ? window.ytcfg : null;
+    const context = (cfg && cfg.get('INNERTUBE_CONTEXT')) || {client: {
+      clientName: 'WEB', clientVersion: (html.match(/"INNERTUBE_CLIENT_VERSION":"([^"]+)"/) || [])[1], hl: 'ja', gl: 'JP'}};
+    const sid = (document.cookie.match(/(?:^|; )SAPISID=([^;]+)/) || document.cookie.match(/(?:^|; )__Secure-3PAPISID=([^;]+)/) || [])[1];
+    if (!sid) throw new Error('ログイン情報を読めません');
+    const ts = Math.floor(Date.now() / 1000);
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(ts + ' ' + sid + ' ' + location.origin));
+    const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    const r = await fetch('/youtubei/v1/browse?prettyPrint=false', {
+      method: 'POST', credentials: 'include',
+      headers: {'Content-Type': 'application/json', 'Authorization': 'SAPISIDHASH ' + ts + '_' + hash,
+                'X-Origin': location.origin, 'X-Goog-AuthUser': String((cfg && cfg.get('SESSION_INDEX')) || 0)},
+      body: JSON.stringify({context: context, continuation: token})
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+  let token = collect(JSON.parse(m[1])), pages = 0, warn = null;
+  try {
+    while (token && pages < 30) {
+      const before = out.length;
+      token = collect(await more(token));
+      pages++;
+      if (out.length === before) break;
     }
-    for (const k in o) walk(o[k]);
-  })(JSON.parse(m[1]));
-  return out;
+  } catch (e) {
+    warn = String((e && e.message) || e);  // 続きが読めなくても、読めたところまでは使う
+  }
+  return {items: out, pages: pages, warn: warn};
 })()
 """
+
+# 自己診断：YouTube のページに頼っている部分が今も使えるかをページの中で確かめる。
+# [項目, 結果(true / false / null = 確かめられない), 説明] の一覧を JSON で返す。
+DIAG_JS = r"""
+(() => {
+  const out = [];
+  const p = document.getElementById('movie_player');
+  const watch = location.pathname.startsWith('/watch');
+  let list = null;
+  try { list = new URL(location.href).searchParams.get('list'); } catch (e) {}
+  const login = /(^|; )(SAPISID|__Secure-3PAPISID)=/.test(document.cookie);
+  out.push(['ログイン', login, login ? 'ログイン中' : 'YouTube にログインしていません']);
+  if (!watch) {
+    out.push(['プレイヤー', null, '動画を開いていないので確かめられません']);
+  } else {
+    const need = ['playVideo', 'pauseVideo', 'nextVideo', 'previousVideo', 'seekTo', 'getPlayerState',
+                  'getCurrentTime', 'getDuration', 'getVideoData', 'getPlaylist', 'playVideoAt'];
+    const miss = need.filter(n => !p || typeof p[n] !== 'function');
+    out.push(['プレイヤー', !miss.length,
+              !p ? '#movie_player が見つかりません' : miss.length ? '使えない操作: ' + miss.join(', ') : '操作 ' + need.length + ' 種類すべて使えます']);
+    const d = p && p.getVideoData ? p.getVideoData() : null;
+    out.push(['曲名', !!(d && d.title), d && d.title ? '取得できます' : 'getVideoData() から曲名を取れません']);
+    if (!list) {
+      out.push(['曲の一覧', null, '再生リストを再生していないので確かめられません']);
+    } else if (!window.__ytp) {
+      out.push(['曲の一覧', false, 'バーが動いていません']);
+    } else {
+      const it = window.__ytp.items();
+      out.push(['曲の一覧', it.ids.length > 0,
+                it.ids.length ? it.ids.length + ' 曲（' + (it.source === 'player' ? 'プレイヤーから' : 'ページの一覧から') + '）'
+                              : '読めません（シャッフル・全曲リピートが効きません）']);
+    }
+  }
+  return JSON.stringify(out);
+})()
+"""
+
 
 
 def eval_js_async(window, script, timeout=20):
@@ -176,10 +256,11 @@ def fetch_playlists_from_page(window):
     url = window.get_current_url() or ""
     if "youtube.com" not in url:
         raise RuntimeError("YouTube のページが開いていません")
-    items = eval_js_async(window, PAGE_PLAYLISTS_JS)
+    result = eval_js_async(window, PAGE_PLAYLISTS_JS, timeout=45)
+    items = result.get("items") if isinstance(result, dict) else None
     if not isinstance(items, list) or not items:
-        raise RuntimeError(f"再生リストを読み取れませんでした: {items!r}"[:200])
-    return items
+        raise RuntimeError(f"再生リストを読み取れませんでした: {result!r}"[:200])
+    return items, {"pages": result.get("pages") or 0, "warn": result.get("warn")}
 
 
 def fetch_playlists():
@@ -219,6 +300,7 @@ class Api:
         self._lock = threading.Lock()
         self._last_save = 0.0
         self._pl_ver = 0
+        self._list_info = {}  # 一覧をどう取ったか（自己診断で出す）
 
     def get_state(self):
         return {
@@ -226,27 +308,72 @@ class Api:
             "last": self._settings.get("last_playlist"),
             "on_top": bool(self._settings.get("on_top")),
             "has_secret": CLIENT_SECRET_FILE.exists(),
+            "shuffle": bool(self._settings.get("shuffle")),
+            "repeat": self._repeat(),
         }
+
+    def _repeat(self):
+        r = self._settings.get("repeat")
+        return r if r in ("all", "one") else "off"
 
     def refresh_playlists(self):
         with self._lock:
+            warn = None
             try:
                 # YouTube の画面と同じ一覧（保存した再生リスト等を含む）。だめなら Data API
-                items = fetch_playlists_from_page(self._window)
+                items, info = fetch_playlists_from_page(self._window)
+                self._list_info = {"source": "page", "count": len(items), **info}
+                if info["warn"]:
+                    warn = f"一覧の続きを読めませんでした（{len(items)} 件まで）"
             except Exception as page_error:
                 print("page playlists failed:", page_error, flush=True)
                 try:
                     items = fetch_playlists()
                 except Exception as e:
+                    self._list_info = {"source": None, "page_error": str(page_error), "error": str(e)}
                     return {"ok": False, "error": str(e)}
+                self._list_info = {"source": "api", "count": len(items), "page_error": str(page_error)}
+                warn = "YouTube のページから一覧を読めず、Data API に切り替えました"
             self._settings["playlists"] = items
             self._pl_ver += 1
             save_settings(self._settings)
-            return {"ok": True, "playlists": items}
+            return {"ok": True, "playlists": items, "warn": warn}
+
+    def diagnose(self):
+        """YouTube のページに頼っている部分が今も動くかを確かめる。lines は [項目, 結果(True/False/None), 説明]。"""
+        lines = [["版", None, f"v{VERSION}"]]
+        self.refresh_playlists()
+        info = self._list_info
+        if info.get("source") == "page":
+            text = f"ページから {info['count']} 件（続きを {info['pages']} 回読み込み）"
+            if info.get("warn"):
+                lines.append(["再生リストの一覧", False, f"{text}。続きを読めません: {info['warn']}"])
+            else:
+                lines.append(["再生リストの一覧", True, text])
+        elif info.get("source") == "api":
+            lines.append(["再生リストの一覧", False,
+                          f"ページから読めず Data API で {info['count']} 件（保存した再生リストなどは出ません）: {info['page_error']}"])
+        else:
+            lines.append(["再生リストの一覧", False, f"{info.get('page_error')} / Data API: {info.get('error')}"])
+        try:
+            page = self._window.evaluate_js(DIAG_JS)
+            lines += json.loads(page) if isinstance(page, str) else page
+        except Exception as e:
+            lines.append(["ページ", False, f"ページの中を調べられません: {e}"])
+        lines.append(["Data API（予備）", None,
+                      ("client_secret.json あり" if CLIENT_SECRET_FILE.exists() else "client_secret.json なし")
+                      + (" / 許可済み" if TOKEN_FILE.exists() else " / 未許可")])
+        return {"ok": all(line[1] is not False for line in lines), "lines": lines}
 
     def select_playlist(self, playlist_id):
-        """選んだ再生リストを覚え、先頭から再生する URL を返す。"""
+        """選んだ再生リストを覚え、前に聴いた位置（なければ先頭）から再生する URL を返す。"""
         self._settings["last_playlist"] = playlist_id
+        pos = self._settings.get("positions", {}).get(playlist_id)
+        if pos and pos.get("url"):
+            self._settings["last_url"] = pos["url"]
+            self._settings["last_time"] = pos.get("time", 0)
+            save_settings(self._settings)
+            return resume_url(pos["url"], pos.get("time"))
         self._settings.pop("last_url", None)
         self._settings.pop("last_time", None)
         save_settings(self._settings)
@@ -263,6 +390,14 @@ class Api:
             return
         self._settings["last_url"] = url
         self._settings["last_time"] = int(seconds or 0)
+        # 再生リストごとにも覚える（別の再生リストから戻ってきたときに続きから流す）
+        list_id = dict(parse_qsl(urlparse(url).query)).get("list")
+        if list_id:
+            positions = self._settings.setdefault("positions", {})
+            positions[list_id] = {"url": url, "time": int(seconds or 0), "at": int(time.time())}
+            if len(positions) > 200:  # 古いものから捨てる
+                for old in sorted(positions, key=lambda k: positions[k].get("at", 0))[:len(positions) - 200]:
+                    del positions[old]
         now = time.monotonic()
         if now - self._last_save > 30:
             self._last_save = now
@@ -288,8 +423,9 @@ class Api:
 
     def player(self, action):
         body = {
-            "prev": "p.previousVideo(); return true;",
-            "next": "p.nextVideo(); return true;",
+            # シャッフル中はバー側（window.__ytp）が次の曲を選ぶ
+            "prev": "if (window.__ytp) window.__ytp.step(-1); else p.previousVideo(); return true;",
+            "next": "if (window.__ytp) window.__ytp.step(1); else p.nextVideo(); return true;",
             "toggle": "if (p.getPlayerState() === 1) p.pauseVideo(); else p.playVideo(); return true;",
         }.get(action)
         return self._player_js(body) if body else None
@@ -298,6 +434,8 @@ class Api:
         s = self._player_status()
         if isinstance(s, dict):
             s["pl_ver"] = self._pl_ver  # 一覧が更新されたらミニプレイヤーが取り直す
+            s["shuffle"] = bool(self._settings.get("shuffle"))
+            s["repeat"] = self._repeat()
         return s
 
     def _player_status(self):
@@ -307,6 +445,19 @@ class Api:
             " try { list = new URL(location.href).searchParams.get('list'); } catch (e) {}"
             " return {title: d.title || '', state: p.getPlayerState(), list: list,"
             " time: p.getCurrentTime ? p.getCurrentTime() : 0, duration: p.getDuration ? p.getDuration() : 0};")
+
+    def set_play_mode(self, shuffle, repeat):
+        """シャッフルとリピート（off / all / one）。実際に曲を選ぶのはページ内のバー（BAR_JS）。"""
+        self._settings["shuffle"] = bool(shuffle)
+        self._settings["repeat"] = repeat if repeat in ("all", "one") else "off"
+        save_settings(self._settings)
+        mode = {"shuffle": self._settings["shuffle"], "repeat": self._settings["repeat"]}
+        if self._window:
+            try:
+                self._window.evaluate_js(f"window.__ytp && window.__ytp.setMode({json.dumps(mode)})")
+            except Exception:
+                pass
+        return mode
 
     def play_playlist(self, playlist_id):
         if self._window:
@@ -342,18 +493,32 @@ BAR_JS = r"""
   const sel = el('select', {title: '再生リスト'}, Object.assign({maxWidth: '280px'}, ctrl));
   const btn = el('button', {textContent: '⟳', title: '再生リストを取得し直す'},
                  Object.assign({cursor: 'pointer'}, ctrl));
+  const shuffleBtn = el('button', {textContent: '🔀︎'}, Object.assign({cursor: 'pointer'}, ctrl));
+  const repeatBtn = el('button', {textContent: '🔁︎'}, Object.assign({cursor: 'pointer'}, ctrl));
+  const diagBtn = el('button', {textContent: '診断', title: 'YouTube のページに頼っている部分が動いているか確かめる'},
+                     Object.assign({cursor: 'pointer'}, ctrl));
   const topLabel = el('label', {title: '常に最前面'}, {display: 'flex', gap: '3px', alignItems: 'center', cursor: 'pointer'});
   const topBox = el('input', {type: 'checkbox'});
   topLabel.append(topBox, document.createTextNode('最前面'));
   const msg = el('span', {}, {color: '#f88', maxWidth: '260px', overflow: 'hidden',
                               textOverflow: 'ellipsis', whiteSpace: 'nowrap'});
-  bar.append(sel, btn, topLabel, msg);
+  bar.append(sel, btn, shuffleBtn, repeatBtn, topLabel, diagBtn, msg);
   document.documentElement.appendChild(bar);
+  // 診断の結果（バーの上に出す）
+  const diagBox = el('div', {id: 'ytp-diag'}, {
+    position: 'fixed', right: '12px', bottom: '56px', zIndex: '2147483647', display: 'none',
+    background: 'rgba(15,15,15,.95)', color: '#fff', padding: '8px 10px', borderRadius: '8px',
+    font: '13px "Segoe UI", sans-serif', border: '1px solid #555', maxWidth: '520px', lineHeight: '1.6',
+    boxShadow: '0 2px 8px rgba(0,0,0,.5)'
+  });
+  document.documentElement.appendChild(diagBox);
 
   function currentList() {
     try { return new URL(location.href).searchParams.get('list'); } catch (e) { return null; }
   }
+  let playlists = [];
   function fill(list, selected) {
+    playlists = list || [];
     sel.replaceChildren(el('option', {value: '', textContent: '— 再生リスト —'}));
     for (const p of list || []) {
       const label = p.count == null ? p.title : p.title + ' (' + p.count + ')';
@@ -366,9 +531,120 @@ BAR_JS = r"""
     msg.textContent = '取得中…';
     msg.style.color = '#aaa';
     const r = await window.pywebview.api.refresh_playlists();
-    if (r.ok) { fill(r.playlists, currentList() || sel.value); msg.textContent = ''; }
-    else { msg.textContent = r.error; msg.title = r.error; msg.style.color = '#f88'; }
+    if (r.ok) {
+      fill(r.playlists, currentList() || sel.value);
+      msg.textContent = r.warn ? '⚠ ' + r.warn : '';
+      msg.title = r.warn || '';
+      msg.style.color = '#fc6';
+    } else { msg.textContent = r.error; msg.title = r.error; msg.style.color = '#f88'; }
   }
+
+  // ---- シャッフル・リピート ----
+  // YouTube のページのボタンには頼らず、曲の終わり（残り約 1 秒）で自分で次の曲へ移す。
+  // 曲の一覧はプレイヤーが持っている（getPlaylist / playVideoAt）。なければページの一覧（ytd-playlist-panel-video-renderer）のリンクを押す。
+  let mode = {shuffle: false, repeat: 'off'};
+  let played = [], history = [], playedList = null, jumpedAt = 0;
+  function player() {
+    const p = document.getElementById('movie_player');
+    return p && p.getPlayerState ? p : null;
+  }
+  function adShowing() {
+    const b = document.getElementById('movie_player');
+    return !!b && b.classList.contains('ad-showing');
+  }
+  function currentVideo() {
+    try { return new URL(location.href).searchParams.get('v'); } catch (e) { return null; }
+  }
+  function items() {
+    const p = player();
+    const ids = p && p.getPlaylist ? p.getPlaylist() : null;
+    if (ids && ids.length) return {source: 'player', ids: [...ids], go: i => p.playVideoAt(i)};
+    const links = [...document.querySelectorAll('ytd-playlist-panel-video-renderer')]
+      .map(item => item.querySelector('a[href*="/watch"]')).filter(Boolean);
+    return {source: 'page', ids: links.map(a => new URL(a.href, location.href).searchParams.get('v')),
+            go: i => links[i].click()};
+  }
+  function go(it, i) { jumpedAt = Date.now(); it.go(i); }
+  // まだ流していない曲から選ぶ。一巡したらやり直す
+  function jumpRandom() {
+    const it = items(), cur = currentVideo(), list = currentList();
+    if (it.ids.length < 2) return false;
+    if (playedList !== list) { playedList = list; played = []; history = []; }
+    if (cur && !played.includes(cur)) played.push(cur);
+    let rest = it.ids.map((v, i) => i).filter(i => !played.includes(it.ids[i]));
+    if (!rest.length) {
+      played = cur ? [cur] : [];
+      rest = it.ids.map((v, i) => i).filter(i => it.ids[i] !== cur);
+    }
+    if (cur) history.push(cur);
+    go(it, rest[Math.floor(Math.random() * rest.length)]);
+    return true;
+  }
+  function step(delta) {
+    const p = player();
+    if (!p) return;
+    if (mode.shuffle && currentList()) {
+      if (delta > 0) { if (jumpRandom()) return; }
+      else if (history.length) {
+        const it = items(), i = it.ids.indexOf(history.pop());
+        if (i >= 0) { go(it, i); return; }
+      }
+    }
+    if (delta > 0) p.nextVideo(); else p.previousVideo();
+  }
+  function checkEnd() {
+    if (!mode.shuffle && mode.repeat === 'off') return;
+    const p = player();
+    if (!p || !location.pathname.startsWith('/watch') || adShowing() || Date.now() - jumpedAt < 3000) return;
+    const d = p.getDuration(), t = p.getCurrentTime();
+    if (!(d > 0) || p.getPlayerState() !== 1 || d - t > 1.2) return;
+    if ((p.getVideoData() || {}).isLive) return;  // ライブ配信はいつも「終わりの直前」に見える
+    if (mode.repeat === 'one') { jumpedAt = Date.now(); p.seekTo(0, true); return; }
+    if (!currentList()) return;
+    if (mode.shuffle) { jumpRandom(); return; }
+    // 全曲リピート：最後の曲なら先頭へ。長い再生リストは一覧が途中までしか読み込まれていないことがあるので、本数と比べる
+    const it = items(), i = it.ids.indexOf(currentVideo());
+    const pl = playlists.find(x => x.id === currentList());
+    const total = pl ? Number(String(pl.count).replace(/,/g, '')) : NaN;
+    if (i >= 0 && i === it.ids.length - 1 && !(total > it.ids.length)) go(it, 0);
+  }
+  document.addEventListener('timeupdate', checkEnd, true);
+  setInterval(checkEnd, 250);
+  function paintMode() {
+    const on = {background: '#3d5a80', borderColor: '#7fb2ff'}, off = {background: '#272727', borderColor: '#444'};
+    Object.assign(shuffleBtn.style, mode.shuffle ? on : off);
+    Object.assign(repeatBtn.style, mode.repeat !== 'off' ? on : off);
+    shuffleBtn.title = 'シャッフル: ' + (mode.shuffle ? 'オン' : 'オフ');
+    repeatBtn.textContent = mode.repeat === 'one' ? '🔂︎' : '🔁︎';
+    repeatBtn.title = 'リピート: ' + ({off: 'オフ', all: '再生リスト全体', one: '1 曲'})[mode.repeat];
+  }
+  function setMode(m) { mode = {shuffle: !!m.shuffle, repeat: m.repeat || 'off'}; paintMode(); }
+  window.__ytp = {step: step, items: items, setMode: setMode};
+  shuffleBtn.addEventListener('click', () => {
+    setMode({shuffle: !mode.shuffle, repeat: mode.repeat});
+    window.pywebview.api.set_play_mode(mode.shuffle, mode.repeat);
+  });
+  repeatBtn.addEventListener('click', () => {
+    setMode({shuffle: mode.shuffle, repeat: ({off: 'all', all: 'one', one: 'off'})[mode.repeat]});
+    window.pywebview.api.set_play_mode(mode.shuffle, mode.repeat);
+  });
+  paintMode();
+  diagBtn.addEventListener('click', async () => {
+    if (diagBox.style.display !== 'none') { diagBox.style.display = 'none'; return; }
+    diagBox.replaceChildren(document.createTextNode('確かめています…'));
+    diagBox.style.display = 'block';
+    const r = await window.pywebview.api.diagnose();
+    diagBox.replaceChildren();
+    for (const [name, ok, text] of r.lines) {
+      const line = el('div');
+      line.append(el('span', {textContent: ok === true ? '✓ ' : ok === false ? '✗ ' : '– '},
+                     {color: ok === true ? '#7d7' : ok === false ? '#f88' : '#aaa'}),
+                  el('b', {textContent: name + '  '}),
+                  el('span', {textContent: text || ''}, {color: ok === false ? '#f88' : '#ccc'}));
+      diagBox.append(line);
+    }
+    if (r.ok) msg.textContent = '';
+  });
   sel.addEventListener('change', async () => {
     if (!sel.value) return;
     msg.textContent = '';
@@ -379,7 +655,7 @@ BAR_JS = r"""
   // 再生中の URL と位置を Python に送る（次回起動時にここから再開）
   setInterval(() => {
     const p = document.getElementById('movie_player');
-    if (!location.pathname.startsWith('/watch') || !p || !p.getCurrentTime) return;
+    if (!location.pathname.startsWith('/watch') || !p || !p.getCurrentTime || adShowing()) return;
     window.pywebview.api.report_position(location.href, Math.floor(p.getCurrentTime()));
   }, 5000);
   // YouTube はページ内遷移なので URL の変化を見て選択を合わせる
@@ -394,6 +670,7 @@ BAR_JS = r"""
   async function init() {
     const s = await window.pywebview.api.get_state();
     topBox.checked = s.on_top;
+    setMode(s);
     fill(s.playlists, currentList());
     // 前回の一覧をすぐ出し、裏で取り直して新しく作った・保存した再生リストも反映する
     refresh();
@@ -417,21 +694,25 @@ MINI_HTML = r"""<!doctype html>
   select { flex: 1; min-width: 0; }
   button { cursor: pointer; }
   button:hover { background: #3a3a3a; }
-  .ctl button { font-size: 15px; width: 44px; }
+  .ctl button { font-size: 15px; width: 38px; padding: 4px 0; }
+  button.on { background: #3d5a80; border-color: #7fb2ff; }
   .spacer { flex: 1; }
   #title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #ddd; }
   #time { color: #aaa; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  #msg { color: #f88; font-size: 12px; }
+  #msg { color: #f88; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style></head>
 <body><div class="wrap">
   <div class="row">
     <select id="sel" title="再生リスト"></select>
     <button id="ref" title="再生リストを取得し直す">⟳</button>
+    <button id="diag" title="YouTube のページに頼っている部分が動いているか確かめる">診断</button>
   </div>
   <div class="row ctl">
     <button id="prev" title="前の動画">⏮&#xFE0E;</button>
     <button id="play" title="再生 / 一時停止">⏯&#xFE0E;</button>
     <button id="next" title="次の動画">⏭&#xFE0E;</button>
+    <button id="shuffle">🔀&#xFE0E;</button>
+    <button id="repeat">🔁&#xFE0E;</button>
     <span class="spacer"></span>
     <button id="show" title="プレイヤー画面に戻す" style="width:auto">画面</button>
   </div>
@@ -440,7 +721,15 @@ MINI_HTML = r"""<!doctype html>
 </div>
 <script>
   const $ = id => document.getElementById(id);
-  let api, plVer = null;
+  let api, plVer = null, mode = {shuffle: false, repeat: 'off'};
+  function paintMode(m) {
+    mode = {shuffle: !!m.shuffle, repeat: m.repeat || 'off'};
+    $('shuffle').classList.toggle('on', mode.shuffle);
+    $('shuffle').title = 'シャッフル: ' + (mode.shuffle ? 'オン' : 'オフ');
+    $('repeat').classList.toggle('on', mode.repeat !== 'off');
+    $('repeat').textContent = mode.repeat === 'one' ? '🔂︎' : '🔁︎';
+    $('repeat').title = 'リピート: ' + ({off: 'オフ', all: '再生リスト全体', one: '1 曲'})[mode.repeat];
+  }
   function fill(list, selected) {
     const sel = $('sel');
     sel.replaceChildren(new Option('— 再生リスト —', ''));
@@ -464,6 +753,7 @@ MINI_HTML = r"""<!doctype html>
     $('title').textContent = s.title || '—';
     $('title').title = s.title || '';
     $('play').textContent = s.state === 1 ? '⏸︎' : '▶︎';
+    if (s.shuffle !== mode.shuffle || s.repeat !== mode.repeat) paintMode(s);
     if (s.pl_ver !== plVer) {
       plVer = s.pl_ver;
       fill((await api.get_state()).playlists, $('sel').value);
@@ -474,6 +764,20 @@ MINI_HTML = r"""<!doctype html>
     api = window.pywebview.api;
     const st = await api.get_state();
     fill(st.playlists, st.last);
+    paintMode(st);
+    $('shuffle').onclick = async () => paintMode(await api.set_play_mode(!mode.shuffle, mode.repeat));
+    $('repeat').onclick = async () =>
+      paintMode(await api.set_play_mode(mode.shuffle, ({off: 'all', all: 'one', one: 'off'})[mode.repeat]));
+    $('diag').onclick = async () => {
+      const msg = $('msg');
+      msg.style.color = '#aaa';
+      msg.textContent = '確かめています…';
+      const r = await api.diagnose();
+      const bad = r.lines.filter(l => l[1] === false);
+      msg.style.color = bad.length ? '#f88' : '#7d7';
+      msg.textContent = bad.length ? bad.map(l => '✗ ' + l[0] + ': ' + l[2]).join(' / ') : '✓ 診断: 問題は見つかりませんでした';
+      msg.title = r.lines.map(l => (l[1] === true ? '✓ ' : l[1] === false ? '✗ ' : '– ') + l[0] + ': ' + l[2]).join('\n');
+    };
     $('prev').onclick = () => api.player('prev').then(poll);
     $('next').onclick = () => api.player('next').then(poll);
     $('play').onclick = () => api.player('toggle').then(() => setTimeout(poll, 300));
@@ -482,7 +786,9 @@ MINI_HTML = r"""<!doctype html>
     $('ref').onclick = async () => {
       $('msg').textContent = '';
       const r = await api.refresh_playlists();
-      if (r.ok) fill(r.playlists, $('sel').value); else $('msg').textContent = r.error;
+      $('msg').style.color = '#f88';
+      if (r.ok) { fill(r.playlists, $('sel').value); $('msg').textContent = r.warn ? '⚠ ' + r.warn : ''; }
+      else $('msg').textContent = r.error;
     };
     document.addEventListener('visibilitychange', poll);
     setInterval(poll, 1000);
@@ -523,7 +829,7 @@ def main():
 
     # 前回見ていた動画の続きから再開。なければ前回の再生リストの先頭、それもなければトップ
     last = settings.get("last_playlist")
-    start_url = resume_url(settings) or (playlist_start_url(last) if last else HOME_URL)
+    start_url = resume_url(settings.get("last_url"), settings.get("last_time")) or (playlist_start_url(last) if last else HOME_URL)
     # 前回の画面状態で起動する: プレイヤー画面（通常 / 最大化）か、ミニプレイヤーか
     geom = dict(settings.get("window", {}))
     state = {
