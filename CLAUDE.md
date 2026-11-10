@@ -22,12 +22,15 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 
 `client_secret*.json`、`token*.json`、`data/`（WebView2 のログイン情報・settings.json）、`playlist_tools/*.txt`（ユーザーの再生リスト）。
 `.gitignore` 済みだが、コミット前に `git status --short --ignored` で確認する。
+**GitHub のリポジトリ（jnakai24/YT_Player）は公開**（スマホに URL からスクリプトを入れるため）。push したものは誰でも見られる。
 
 ## バージョン
 
 - `ytplayer.py` の `VERSION`（現在 0.1）がウィンドウタイトルに出る（`YT Player v0.1` / `YT Player mini v0.1`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.10）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.10 · page` と出る。
 
 ## YouTube のページに頼っている部分（壊れやすい）
 
@@ -55,6 +58,41 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - 同じユーザーデータフォルダで二重に起動すると、後から起動した側の WebView2 が初期化に失敗して固まる（0x8007139F）。`already_running()` で防いでいる。
 - 音ありの自動再生は環境変数 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--autoplay-policy=no-user-gesture-required` で許可している。
 - タスクバーで python.exe と別扱いにするため `SetCurrentProcessExplicitAppUserModelID("jnaka.YTPlayer")` を呼んでいる。
+
+## Firefox（Android）版の注意点（実機で確認済み）
+
+スマホの Firefox ＋ Violentmonkey で m.youtube.com に入れるユーザースクリプト。インストール URL は
+`https://raw.githubusercontent.com/jnakai24/YT_Player/main/android/ytplayer.user.js`（push 後、反映に数分かかることがある）。
+
+- **再生リストの一覧**：m.youtube.com からは www の `/feed/playlists` を読めない（別オリジン）。
+  YouTube の内部 API `/youtubei/v1/browse`（`browseId: FEplaylist_aggregation`）に Cookie と `Authorization: SAPISIDHASH …` を付けて POST する。
+  `clientName` は **`WEB`** にする（`MWEB` だと中身が空）。`WEB_CLIENT_VERSION` が古すぎると断られるので、そのときは www の `ytcfg.get('INNERTUBE_CLIENT_VERSION')` に合わせる。
+  結果の `lockupViewModel` の読み方は本体の `PAGE_PLAYLISTS_JS` と同じ（結果が一致することを確認済み）。
+- **曲送り**：m.youtube.com のプレイヤーは再生リストを持たない（`getPlaylist()` が空で `nextVideo()` が空振りする）。
+  ページ側の一覧 `ytm-playlist-panel-video-renderer` から今の動画（`v=`）の前後を探してリンクをクリックする（`step()`）。
+  一覧は開いた直後や広告の間はまだないので、押された操作を覚えて最大 10 秒待つ（`tryStep()`）。www ではプレイヤーが再生リストを持つので `nextVideo()` を使う。
+- **自動再生**：スマホ版 YouTube は、Firefox で自動再生を許可していても開いただけでは再生しない。
+  スクリプトが開くページ（開いたら続きから・動画を見ていないときの ▶・再生リストを選んだとき）は、開く前に sessionStorage `ytp-play` に進める秒数を入れ、開いた先で `startPlayback()` が `playVideo()` する。
+- **前回の位置へ進める**：Firefox では URL の `t=` が効く前に再生が始まって先頭から流れることがある。**再生が始まってから**（state 1）`seekTo()` する。広告の間（`#movie_player` に `ad-showing`）は待つ。
+- **裏に回したとき**：Firefox は再生中のページを、裏に回しても画面を消しても「見えている」扱いのまま（`visibilitychange` が来ない）。
+  そのため YouTube 自身もあまり止めない。来るのは `blur` と描画の停止（requestAnimationFrame が来ない）だけで、裏に回す・画面を消す・Firefox を一覧から消すの区別がつかない。
+  Firefox を最近のアプリ一覧から消しても、ページは動き続けて何も届かない（`pagehide` も来ない）。**「Firefox を閉じたら止める」はスクリプトからはできない**（0.7〜0.9 で試して外した）。
+  ユーザーは**画面を消しても裏で再生を続けたい**ので、裏に回ったことを理由に止める処理は入れない。
+- 「裏で再生」は `document.hidden` などの上書きと `visibilitychange` の握りつぶし（Premium の機能を回避する使い方なので既定はオフ）。
+- ⚙ の下の「記録」は、Firefox から届いた知らせ（見える / 見えない、フォーカス、pagehide、描画の停止 / 再開）と再生状態を localStorage `ytp-log` に 12 件残す。実機での調査はこれのスクリーンショットをもらう。
+- Violentmonkey がスクリプトをコンテンツスクリプトとして動かすことがある。そのときはページ側のメソッドが見えないので `wrappedJSObject` / `exportFunction` を通す（`pageObj()` / `pageFn()`）。実機は `page` だった。
+- アニメーションの終了の知らせ（`onfinish`）は画面が描かれていないと届かない。タイトルを流す処理の終わりは `setTimeout` で受ける。
+- 保存先：localStorage `ytp-settings`（一覧・前回の URL と位置・スイッチ）、`ytp-log`。sessionStorage `ytp-resumed`（タブで 1 回だけ続きから）、`ytp-play`。
+
+### Firefox 版の動作確認
+
+ユーザーのスマホは触れないので、アプリ内のブラウザ（Claude Browser）でスマホ版を開いて確かめ、最後は実機で試してもらう。
+
+- `resize_window` を `mobile` にしてから m.youtube.com を開く（パソコンの大きさだと www の `?app=desktop` に飛ばされる）。終わったら `desktop` に戻す。ログインはしていない（一覧の取得は試せない）。
+- スクリプトは `@run-at document-start` なので本来の読み込み時には入れられない。**一時ブランチ（`tmp-userscript-test`）に push し、ページで raw の URL（コミットのハッシュ指定）を fetch して eval する。**
+  youtube.com は Trusted Types なので `eval(trustedTypes.createPolicy('ytp-test-' + Date.now(), {createScript: s => s}).createScript(code))`。終わったらブランチはリモートも含めて消す。
+- 音が出るので、試すときは `#movie_player` の `mute()` を先に呼ぶ。試したあとは localStorage / sessionStorage の `ytp-*` を消す。
+- アプリ内のブラウザの画面が隠れていると、requestAnimationFrame やアニメーションが止まり、タイマーも間引かれる（`tabs_context` で分かる）。
 
 ## Data API / OAuth
 
