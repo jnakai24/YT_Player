@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.18
+// @version      0.19
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.18';
+  const VERSION = '0.19';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -40,6 +40,25 @@
   const settings = load();
   function save() {
     try { localStorage.setItem(STORE, JSON.stringify(settings)); } catch (e) {}
+  }
+
+  // ---- 動画のデータをどれだけ通信で取ったか（保存分で流せているかの確かめ用） ----
+  // ページが取りに行った動画のデータ（アドレスに videoplayback を含むもの）の件数と、通信した大きさを数える。
+  // 保存分で流れているなら、件数は増えても通信した大きさはほとんど増えないはず。記録と「記録をコピー」に出す。
+  const media = {count: 0, bytes: 0, last: ''};
+  try {
+    new PerformanceObserver(list => {
+      for (const e of list.getEntries()) {
+        if (e.name.indexOf('videoplayback') < 0) continue;
+        media.count++;
+        media.bytes += e.transferSize || 0;
+        media.last = Math.round(e.duration) + 'ms 通信' + (e.transferSize || 0) + 'B 中身' + (e.encodedBodySize || 0) + 'B' +
+                     (e.workerStart > 0 ? ' SW経由' : '');
+      }
+    }).observe({type: 'resource', buffered: true});
+  } catch (e) {}
+  function mediaText() {
+    return 'データ ' + media.count + ' 件 / 通信 ' + Math.round(media.bytes / 1024) + ' KB' + (media.last ? '（直近 ' + media.last + '）' : '');
   }
 
   // ---- 「PC 版で開く」：スマホ版（m.youtube.com）を開いたら、パソコン版の表示（www、app=desktop）へ移る ----
@@ -926,6 +945,7 @@
                        ' / 一覧 ' + ((typeof p.getPlaylist === 'function' && p.getPlaylist()) || []).length + ' 曲' : 'なし') +
         (playerError() ? ' / エラー: ' + playerError() : ''),
       'プレイヤーの詳細: ' + playerDetail(),
+      '動画のデータ（このページを開いてから）: ' + mediaText(),
       '設定: 優先=' + !!settings.offline + ' 元のリスト=' + (settings.offline_list || '-') + ' 保存済みの控え=' + (settings.saved || []).length +
         ' 曲順の控え=' + Object.keys(settings.orders || {}).map(k => k + ':' + settings.orders[k].length).join(',') +
         ' シャッフル=' + !!settings.shuffle + ' リピート=' + repeatMode() + ' 裏で再生=' + !!settings.bg + ' 続きから=' + (settings.autoresume !== false),
@@ -1101,7 +1121,7 @@
     const sig = watching ? currentVideo() + ':' + p.getPlayerState() + ':' + err : '';
     if (sig !== lastSig) {
       lastSig = sig;
-      if (watching) log('v=' + currentVideo() + (id ? ' list=' + (id === 'PPSV' ? id : id.slice(0, 6) + '…') : '') + (err ? ' エラー: ' + err : ''));
+      if (watching) log('v=' + currentVideo() + (id ? ' list=' + (id === 'PPSV' ? id : id.slice(0, 6) + '…') : '') + (err ? ' エラー: ' + err : '') + ' [' + mediaText() + ']');
     }
     let title = '', time = '';
     if (watching) {
