@@ -29,8 +29,8 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - `ytplayer.py` の `VERSION`（現在 0.2）がウィンドウタイトルに出る（`YT Player v0.2` / `YT Player mini v0.2`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.12）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.12 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.13）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.13 · page` と出る。
 
 ## YouTube のページに頼っている部分（壊れやすい）
 
@@ -91,7 +91,10 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
   Firefox を最近のアプリ一覧から消しても、ページは動き続けて何も届かない（`pagehide` も来ない）。**「Firefox を閉じたら止める」はスクリプトからはできない**（0.7〜0.9 で試して外した）。
   ユーザーは**画面を消しても裏で再生を続けたい**ので、裏に回ったことを理由に止める処理は入れない。
 - 「裏で再生」は `document.hidden` などの上書きと `visibilitychange` の握りつぶし（Premium の機能を回避する使い方なので既定はオフ）。
-- ⚙ の下の「記録」は、Firefox から届いた知らせ（見える / 見えない、フォーカス、pagehide、描画の停止 / 再開）と再生状態を localStorage `ytp-log` に 12 件残す。実機での調査はこれのスクリーンショットをもらう。
+- ⚙ の下の「記録」は、Firefox から届いた知らせ（見える / 見えない、フォーカス、pagehide、描画の停止 / 再開）と再生状態を localStorage `ytp-log` に残す。
+  0.13 からは**スクリプト自身の動き**（開いた先、移った曲、再生を試した回数、プレイヤーのエラー文、スクリプトの例外）も残す。80 件まで、画面には新しい 20 件。
+  実機での調査は、⚙ →「記録をコピー」で記録と今の状態をコピーして貼ってもらう（ユーザーの提案。スクリーンショットより確実）。
+  新しい仕組みを足したら、要所で `log()` を呼ぶ。記録を外へ送る仕組みは入れていない（https のページから家の PC へは送れず、外のサービスに送るのは避けたい）。
 - Violentmonkey がスクリプトをコンテンツスクリプトとして動かすことがある。そのときはページ側のメソッドが見えないので `wrappedJSObject` / `exportFunction` を通す（`pageObj()` / `pageFn()`）。実機は `page` だった。
 - アニメーションの終了の知らせ（`onfinish`）は画面が描かれていないと届かない。タイトルを流す処理の終わりは `setTimeout` で受ける。
 - 保存先：localStorage `ytp-settings`（一覧・前回の URL と位置・スイッチ・`orders`・`saved`）、`ytp-log`。sessionStorage `ytp-resumed`（タブで 1 回だけ続きから）、`ytp-play`。

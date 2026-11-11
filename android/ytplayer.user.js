@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.12
+// @version      0.13
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.12';
+  const VERSION = '0.13';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -62,8 +62,10 @@
         const i = order.indexOf(v);
         v = order.slice(i + 1).concat(order.slice(0, i + 1)).find(id => saved.includes(id)) || null;
         time = 0;
+        if (!v) log('保存済みの曲がないので、通信する側で開く');
       }
       if (v) {
+        log('保存分の側で開く v=' + v + (time > 5 ? ' ' + time + ' 秒から' : ''));
         u.searchParams.set('v', v);
         u.searchParams.set('list', 'PPSV');
         u.searchParams.delete('index');
@@ -125,14 +127,17 @@
   // 記録するもの：見える / 見えない（visibilitychange）、フォーカス、pagehide / pageshow / freeze / resume / beforeunload、
   // 描画の停止 / 再開（requestAnimationFrame が 3 秒以上来ない）。それぞれの時点の再生状態も添える。
   const realHidden = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden').get;
+  // スクリプト自身の動き（どこを開いたか、どの曲へ移ったか、再生を試したか、エラー）もここに残す。
+  // 80 件まで。⚙ の下には新しい 20 件を出し、「記録をコピー」で全部をコピーできる。
   function log(text) {
     const d = new Date(), hms = [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
     const p = player();
     const state = p ? ({'-1': '未開始', 0: '終了', 1: '再生中', 2: '停止中', 3: '読込中', 5: '待機'})[p.getPlayerState()] || '' : '';
     try {
       const lines = JSON.parse(localStorage.getItem('ytp-log') || '[]');
-      lines.push(hms + ' ' + text + (state ? '（' + state + '）' : ''));
-      localStorage.setItem('ytp-log', JSON.stringify(lines.slice(-12)));
+      const at = p && state && p.getCurrentTime ? ' ' + fmt(p.getCurrentTime()) : '';
+      lines.push(hms + ' ' + text + (state ? '（' + state + at + '）' : ''));
+      localStorage.setItem('ytp-log', JSON.stringify(lines.slice(-80)));
     } catch (e) {}
   }
   (function installBackground() {
@@ -251,7 +256,13 @@
             go: i => links[i].click()};
   }
   // 別の曲へ移るときは、開いたときの「前回の位置へ進める」（resumeSeek）を取り消す（前の曲の位置なので）
-  function go(it, i) { jumpedAt = Date.now(); pendingStep = null; resumeSeek = 0; it.go(i); }
+  function go(it, i) {
+    jumpedAt = Date.now();
+    pendingStep = null;
+    resumeSeek = 0;
+    log('→ ' + (it.ids[i] || i) + '（' + (i + 1) + ' / ' + it.ids.length + '）');
+    it.go(i);
+  }
   // まだ流していない曲から選ぶ。一巡したらやり直す
   function jumpRandom() {
     const it = items(), cur = currentVideo(), list = currentList();
@@ -283,6 +294,7 @@
               pendingStep = null;
               resumeSeek = 0;
               restartFor = v;  // 保存済みの曲は前回の続きから始まることがあるので、始まったら先頭に戻す（checkEnd）
+              log('→ ' + v + '（保存分 ' + (saved.indexOf(v) + 1) + ' / ' + saved.length + '、元の順 ' + (order.indexOf(v) + 1) + ' / ' + order.length + '）');
               p.playVideoAt(saved.indexOf(v));
             }};
   }
@@ -358,12 +370,13 @@
       if (Date.now() - jumpedAt > 8000) restartFor = null;
       else if (currentVideo() === restartFor && state === 1) {
         restartFor = null;
-        if (p.getCurrentTime() > 3) p.seekTo(0, true);
+        if (p.getCurrentTime() > 3) { log('途中から始まったので先頭に戻す'); p.seekTo(0, true); }
       }
     }
     if (Date.now() - jumpedAt < 3000) return;
     // 保存分で流している間に曲が終わってしまったとき（終わりの直前から始まったときなど）も、次の曲へ
     if (vt && state === 0) {
+      log('曲が終わっていた → 次の保存済みの曲へ');
       virtualStep(vt, 1, true);
       jumpedAt = Date.now();
       return;
@@ -375,7 +388,8 @@
     if (repeat === 'one') { jumpedAt = Date.now(); p.seekTo(0, true); return; }
     if (vt) {
       // 保存分で流している間は、いつも自分で次の曲を選ぶ（YouTube に任せると保存した順に進んでしまう）
-      if (virtualStep(vt, 1, true) === 'end') { jumpedAt = Date.now(); p.pauseVideo(); }
+      log('曲の終わり');
+      if (virtualStep(vt, 1, true) === 'end') { jumpedAt = Date.now(); log('最後の曲なので止める'); p.pauseVideo(); }
       return;
     }
     if (!currentList()) return;
@@ -386,8 +400,18 @@
     const total = pl ? Number(String(pl.count).replace(/,/g, '')) : NaN;
     if (i >= 0 && i === it.ids.length - 1 && !(total > it.ids.length)) go(it, 0);
   }
-  document.addEventListener('timeupdate', checkEnd, true);
-  setInterval(checkEnd, 250);
+  // スクリプトの中で起きたエラーも記録に残す（同じ内容は 1 回だけ）
+  let lastError = '';
+  function safe(fn, name) {
+    return function () {
+      try { return fn.apply(this, arguments); } catch (e) {
+        const text = name + ': ' + ((e && e.message) || e);
+        if (text !== lastError) { lastError = text; log('スクリプトのエラー ' + text); }
+      }
+    };
+  }
+  document.addEventListener('timeupdate', safe(checkEnd, 'checkEnd'), true);
+  setInterval(safe(checkEnd, 'checkEnd'), 250);
   function currentList() {
     try { return new URL(location.href).searchParams.get('list'); } catch (e) { return null; }
   }
@@ -643,7 +667,10 @@
                      Object.assign({}, ctrl, {fontSize: '12px'}));
   row3.append(resumeLabel, bgLabel);
   if (!isMobile) row3.append(offLabel, saveBtn);
-  row3.append(diagBtn, about, diagEl, logEl);
+  // うまく動かないときに、記録（80 件）と今の状態をまとめてコピーする。チャットなどに貼って見せる
+  const logBtn = el('button', {textContent: '記録をコピー', title: '記録と今の状態をクリップボードにコピーする'},
+                    Object.assign({}, ctrl, {fontSize: '12px'}));
+  row3.append(diagBtn, logBtn, about, diagEl, logEl);
   bar.append(row1, rowTitle, row2, info, row3);
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
@@ -755,6 +782,7 @@
     const p = player(), vt = virtual(), id = currentList(), v = currentVideo();
     settings.offline = offBox.checked;
     save();
+    log('オフライン優先を' + (settings.offline ? 'オン' : 'オフ') + 'にした');
     if (!p || !v || !location.pathname.startsWith('/watch')) return;
     const list = settings.offline ? id : (vt ? vt.list : null);
     if (!list || list === 'PPSV' || (settings.offline && !(settings.orders || {})[id])) {
@@ -811,10 +839,39 @@
     }
     const stopped = !saving;
     saving = false;
+    log('このリストを保存: 追加 ' + added + ' / 保存済み ' + already + ' / 失敗 ' + failed + ' / 全 ' + rows.length + (stopped ? '（中止）' : ''));
     showMessage((stopped ? '中止しました。' : '') + added + ' 曲の保存を始めました（保存済み ' + already + '、失敗 ' + failed +
                 '）。終わるまでこのページを開いたままにしてください', failed > 0);
   }
   saveBtn.addEventListener('click', saveAll);
+  logBtn.addEventListener('click', async () => {
+    let lines = [];
+    try { lines = JSON.parse(localStorage.getItem('ytp-log') || '[]'); } catch (e) {}
+    const p = player(), u = new URL(location.href);
+    const head = [
+      'YT Player v' + VERSION + ' · ' + MODE + ' · ' + location.hostname,
+      'ページ: ' + u.pathname + ' v=' + (u.searchParams.get('v') || '-') + ' list=' + (u.searchParams.get('list') || '-'),
+      'プレイヤー: ' + (p ? '状態 ' + p.getPlayerState() + ' / ' + fmt(p.getCurrentTime()) + ' / ' + fmt(p.getDuration()) +
+                       ' / 一覧 ' + ((typeof p.getPlaylist === 'function' && p.getPlaylist()) || []).length + ' 曲' : 'なし') +
+        (playerError() ? ' / エラー: ' + playerError() : ''),
+      '設定: 優先=' + !!settings.offline + ' 元のリスト=' + (settings.offline_list || '-') + ' 保存済みの控え=' + (settings.saved || []).length +
+        ' 曲順の控え=' + Object.keys(settings.orders || {}).map(k => k + ':' + settings.orders[k].length).join(',') +
+        ' シャッフル=' + !!settings.shuffle + ' リピート=' + repeatMode() + ' 裏で再生=' + !!settings.bg + ' 続きから=' + (settings.autoresume !== false),
+      '前回: ' + (settings.last_url || '-') + ' ' + (settings.last_time || 0) + ' 秒'
+    ];
+    const text = head.concat(lines).join('\n');
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {}
+    if (!ok) {
+      // クリップボードに書けないとき：選択した状態の入力欄を出す（長押しでコピーできる）
+      const area = el('textarea', {value: text, readOnly: true}, {width: '100%', height: '120px', fontSize: '11px'});
+      logEl.before(area);
+      area.select();
+      try { ok = document.execCommand('copy'); } catch (e) {}
+      if (ok) area.remove();
+    }
+    showMessage(ok ? '記録をコピーしました（' + lines.length + ' 件）。チャットに貼り付けてください' : 'コピーできませんでした。下の欄を長押しでコピーしてください', !ok);
+  });
   resumeBox.addEventListener('change', () => { settings.autoresume = resumeBox.checked; save(); });
   optBtn.addEventListener('click', () => { settings.showopts = !settings.showopts; save(); applyOpts(); });
   function applyOpts() { row3.style.display = settings.showopts ? 'flex' : 'none'; showLog(); }
@@ -822,7 +879,7 @@
     if (!settings.showopts) return;
     let lines = [];
     try { lines = JSON.parse(localStorage.getItem('ytp-log') || '[]'); } catch (e) {}
-    const text = lines.length ? '記録:\n' + lines.join('\n') : '';
+    const text = lines.length ? '記録:\n' + lines.slice(-20).join('\n') : '';
     if (logEl.textContent !== text) logEl.textContent = text;
   }
 
@@ -835,7 +892,7 @@
     let plays = 0, seeks = 0, last = 0;
     const timer = setInterval(() => {
       const done = () => { clearInterval(timer); wantPlay = false; resumeSeek = 0; };
-      if (Date.now() - started > 60000) return done();
+      if (Date.now() - started > 60000) { log('再生が始まらないまま 60 秒たった'); return done(); }
       const p = player();
       if (!p || !p.getDuration || !(p.getDuration() > 0)) return;
       if (adShowing()) return;  // 広告の再生中
@@ -845,6 +902,7 @@
         if (resumeSeek && p.getCurrentTime() < resumeSeek - 5 && seeks < 5) {
           last = Date.now();
           seeks++;
+          log('前回の位置（' + fmt(resumeSeek) + '）へ進める');
           p.seekTo(resumeSeek, true);
           return;  // 2 秒後に、進んだか確かめる
         }
@@ -853,6 +911,7 @@
       if (!wantPlay || state === 3 || plays >= 5) return;  // 読み込み中など
       last = Date.now();
       plays++;
+      log('再生を始める（' + plays + ' 回目）');
       p.playVideo();
     }, 500);
   }
@@ -868,8 +927,15 @@
   }
 
   // 1 秒ごと：ボタンの表示、再生リストの選択、バーが消されていないか
-  let lastSave = 0, ensured = false;
-  function tick() {
+  // プレイヤーに出ているエラーの文（「この動画は再生できません」など）
+  function playerError() {
+    const e = document.querySelector('#movie_player .ytp-error');
+    return e && e.offsetParent !== null ? e.innerText.trim().replace(/\s+/g, ' ').slice(0, 60) : '';
+  }
+  let lastSave = 0, ensured = false, lastSig = '', whyLogged = false;
+  const startedAt = Date.now();
+  function tick() { safe(tickBody, 'tick')(); }
+  function tickBody() {
     if (!bar.isConnected) document.documentElement.append(bar, openBtn);
     tryStep();
     showLog();
@@ -886,8 +952,25 @@
     if (offEl.textContent !== offText) offEl.textContent = offText;
     if (vt && !ensured && !adShowing()) {
       ensured = true;
+      const here = vt.avail.includes(currentVideo());
+      log('保存分で流す: 保存済み ' + vt.avail.length + ' / ' + vt.order.length + '（保存分の一覧 ' + vt.saved.length + ' 曲）' +
+          (here ? '' : '。開いた曲は保存済みでないので移る'));
       if (!vt.avail.length) showMessage('この再生リストには保存済みの曲がありません', true);
-      else if (!vt.avail.includes(currentVideo())) virtualStep(vt, 1, false);
+      else if (!here) virtualStep(vt, 1, false);
+    }
+    // オフライン優先なのに保存分の仕組みが動いていないとき、理由を 1 回だけ残す
+    if (watching && !vt && !whyLogged && !onMobile() && settings.offline && id === 'PPSV' && Date.now() - startedAt > 8000) {
+      whyLogged = true;
+      const ids = typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
+      log('保存分の仕組みが動いていない: ' + (!settings.offline_list ? '元の再生リストが分からない'
+        : !(settings.orders || {})[settings.offline_list] ? '曲順の控えがない' : 'プレイヤーの一覧が空（' + (ids ? ids.length : 'なし') + '）'));
+    }
+    // 動画・再生状態・エラーが変わったら残す
+    const err = watching ? playerError() : '';
+    const sig = watching ? currentVideo() + ':' + p.getPlayerState() + ':' + err : '';
+    if (sig !== lastSig) {
+      lastSig = sig;
+      if (watching) log('v=' + currentVideo() + (id ? ' list=' + (id === 'PPSV' ? id : id.slice(0, 6) + '…') : '') + (err ? ' エラー: ' + err : ''));
     }
     let title = '', time = '';
     if (watching) {
@@ -935,6 +1018,9 @@
     paintMode();
     applyZoom();
     window.addEventListener('resize', applyZoom);
+    log('開始 v' + VERSION + ' ' + location.hostname.split('.')[0] + location.pathname + ' list=' + (currentList() || '-') +
+        ' 優先=' + (settings.offline ? 'オン' : 'オフ') + ' 控え=' + (settings.saved || []).length +
+        (wantPlay ? ' 再生する' : '') + (resumeSeek ? ' 位置=' + resumeSeek : '') + ' 拡大=' + (bar.style.zoom || '1'));
     fill(settings.playlists, shownList() || settings.last_playlist);
     document.documentElement.append(bar, openBtn);
     applyFold();
