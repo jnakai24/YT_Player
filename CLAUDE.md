@@ -29,8 +29,8 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - `ytplayer.py` の `VERSION`（現在 0.2）がウィンドウタイトルに出る（`YT Player v0.2` / `YT Player mini v0.2`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.20）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.20 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.21）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.21 · page` と出る。
 
 ## YouTube のページに頼っている部分（壊れやすい）
 
@@ -111,12 +111,16 @@ Windows 版の YT Player（WebView2）でも保存と保存分の再生ができ
 - **`watch?v=ID&list=PPSV`** で開くと、通信せず保存分で再生される（アドレスを直接開いてもよい。詳細統計情報の Network Activity が 0 KB のまま）。
   `list=再生リストID` で開くと、保存済みの曲でも通信する。`PPSV` は「オフライン保存」の並びの ID。
 - `list=PPSV` のとき `getPlaylist()` は**保存済みの曲の ID（新しく保存した順）**。`playVideoAt(i)` で移れる。この一覧の曲にはメニューがない（ここからは消せない）。
-- **オフライン優先**（`virtual()` / `virtualStep()`）：`list=PPSV` の側で開き、曲の終わりごとに「元の再生リストの順で次の、保存済みの曲」へ `playVideoAt` で移る。
+- **オフライン優先**（`virtual()` / `virtualStep()`、通信する側は `streamCtx()` / `streamStep()`）：元の再生リストの順（`pickNext()`）で次の曲を選び、
+  **保存済みなら保存分の側（`list=PPSV`）、保存していない曲なら通信する側（`list=再生リストID`）で流す**（0.21。それまでは飛ばしていた。ユーザーの要望）。
+  同じ側の中は `playVideoAt` で移り、側が変わるときはページを開き直す（`openSide()`、`ytp-play` の印で再生を始める）。
+  通信する側で次も保存していない曲のときは、YouTube に任せる（終わりを切らない）。
   元の曲順は、通信して流したときの `getPlaylist()` を `settings.orders[再生リストID]` に覚える（10 件まで）。保存済みの控えは `settings.saved`。
   どの再生リストとして流しているかは `settings.offline_list`。位置（`positions` / `last_url`）は元の再生リストの URL の形で覚え、開くときに `resumeTarget()` が `PPSV` に書き換える。
 - `list=PPSV` では、YouTube が曲を**前回やめた位置から**始める。このスクリプトは曲の終わりの直前で次へ移るので、一度流した曲の位置は**いつも終わりの直前**になる。
   そのまま始まると、すぐ終わる → YouTube が保存した順（元の順の逆）で次へ → それも終わりの直前、と曲が行ったり来たりする（0.19 の実機の記録）。
-  移ってから 6 秒間は見張り、プレイヤーの動画（`getVideoData().video_id`）がその曲で 3 秒より先なら `seekTo(0)` する（`restartFor`）。
+  移ってから 6 秒間は見張り、プレイヤーの動画（`getVideoData().video_id`）がその曲で「移ってからたった時間 + 3 秒」より先なら `seekTo(0)` する（`restartFor`）。
+  （ただの「3 秒より先」だと、普通に 3 秒流れたところでもう一度頭出ししてしまう。）
   位置は再生開始の少しあとに反映されることがあるので、1 回見て終わりにしない。見張りの間は曲の終わりの判定をしない。
 - **保存分で流れていることの確かめ方**：`PerformanceObserver` で `videoplayback` の `transferSize` を数える（`mediaText()`、記録に出る）。
   実機で、オフライン優先オンは 4 分以上流して 0 増、オフは 1 曲あたり 6〜10 MB 増えた。保存そのものは 1 曲あたり約 10 MB。
@@ -137,6 +141,8 @@ Windows 版の YT Player（WebView2）でも保存と保存分の再生ができ
   URL に `app=` があるときは移らない（www から戻されたとき・「スマホ版へ」（`?app=m`）で戻ったときに、行ったり来たりしないため）。
   m と www は localStorage が別なので、位置・曲順・スイッチはそれぞれに持つ。
 - 機内モードではページ自体が開けないので、**圏外から聴き始めることはできない**（ユーザーの実機で確認）。
+- **見た目**：ボタンの絵は SVG で描く（`ICONS` / `setIcon()`）。絵文字（⏯ 🔀 🔁）は Android で色付きの四角い絵になり、押されたまま・モード中に見えるため。
+  シャッフル・リピートは、オンが黄色の絵と枠、オフが灰色（塗りつぶさない）。タイトルは保存分で流しているとき緑（`OFFLINE_COLOR`）、通信しているとき白。
 - 「デスクトップ サイト」のときは UA がパソコンのものになるので、スマホかどうかは `(pointer: coarse)` で見分け、バーを `zoom` で拡大する（`applyZoom()`）。
 
 ### Firefox 版の動作確認

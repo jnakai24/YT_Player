@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.20
+// @version      0.21
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.20';
+  const VERSION = '0.21';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -234,6 +234,8 @@
   function step(delta) {
     const vt = virtual();
     if (vt && virtualStep(vt, delta, false) === true) return;
+    const sc = vt ? null : streamCtx();
+    if (sc && streamStep(sc, delta, false)) return;
     if (settings.shuffle && currentList()) {
       // シャッフル中：⏭ はまだ流していない曲へ、⏮ は直前に流した曲へ
       if (delta > 0) { if (jumpRandom()) return; }
@@ -339,40 +341,78 @@
             }};
   }
   // 移ったら true。最後の曲の終わりで、全体リピートでないときは 'end'。
-  function virtualStep(vt, delta, atEnd) {
-    const cur = currentVideo(), av = vt.avail;
-    if (!av.length) return false;
+  // 元の再生リストの順（シャッフルなら、まだ流していない曲）で次の曲を選ぶ。保存済みかどうかは見ない。
+  // 最後の曲の終わりで全体リピートでないときは 'end'。選べないときは null。
+  function pickNext(list, order, delta, atEnd) {
+    const cur = currentVideo();
     if (settings.shuffle) {
-      const key = 'PPSV:' + vt.list;
+      const key = 'mix:' + list;
       if (playedList !== key) { playedList = key; played = []; history = []; }
-      if (delta < 0) {
-        while (history.length) {
-          const v = history.pop();
-          if (vt.saved.includes(v)) { vt.go(v); return true; }
-        }
-        return false;
-      }
+      if (delta < 0) return history.length ? history.pop() : null;
       if (cur && !played.includes(cur)) played.push(cur);
-      let rest = av.filter(v => !played.includes(v));
+      let rest = order.filter(v => !played.includes(v));
       if (!rest.length) {
         played = cur ? [cur] : [];
-        rest = av.filter(v => v !== cur);
+        rest = order.filter(v => v !== cur);
       }
-      if (!rest.length) return false;
+      if (!rest.length) return null;
       if (cur) history.push(cur);
-      vt.go(rest[Math.floor(Math.random() * rest.length)]);
-      return true;
+      return rest[Math.floor(Math.random() * rest.length)];
     }
-    const n = vt.order.length, i = vt.order.indexOf(cur);
-    for (let k = 1; k <= n; k++) {
-      let j = i + delta * k;
-      if (j < 0 || j >= n) {
-        if (atEnd && repeatMode() !== 'all') return 'end';
-        j = ((j % n) + n) % n;
-      }
-      if (vt.saved.includes(vt.order[j])) { vt.go(vt.order[j]); return true; }
+    const n = order.length;
+    let j = order.indexOf(cur) + delta;
+    if (j < 0 || j >= n) {
+      if (atEnd && repeatMode() !== 'all') return 'end';
+      j = ((j % n) + n) % n;
     }
-    return false;
+    return order[j];
+  }
+  // 保存分の側（list=PPSV）と通信する側（list=再生リスト）は別のページなので、行き来するときは開き直す
+  function openSide(list, v, savedSide) {
+    settings.offline_list = list;
+    settings.last_url = location.origin + '/watch?v=' + v + '&list=' + list;
+    settings.last_time = 0;
+    save();
+    log('→ ' + v + (savedSide ? '（保存済みなので、保存分の側へ開き直す）' : '（保存していない曲なので、通信する側へ開き直す）'));
+    jumpedAt = Date.now();
+    pendingStep = null;
+    resumeSeek = 0;
+    markAutoplay(0);
+    location.href = '/watch?v=' + v + '&list=' + (savedSide ? 'PPSV' : list);
+  }
+  // 保存分の側で次の曲へ。保存済みならそのまま移り、保存していない曲なら通信する側へ開き直す。
+  // 移ったら true。最後の曲の終わりで、全体リピートでないときは 'end'。
+  function virtualStep(vt, delta, atEnd) {
+    const v = pickNext(vt.list, vt.order, delta, atEnd);
+    if (v === 'end') return 'end';
+    if (!v) return false;
+    if (vt.saved.includes(v)) vt.go(v); else openSide(vt.list, v, false);
+    return true;
+  }
+  // 通信する側（list=再生リスト）で流しているとき。オフライン優先で、曲順と保存済みの控えがあるときだけ
+  function streamCtx() {
+    if (onMobile() || !settings.offline) return null;
+    const id = currentList(), order = id && id !== 'PPSV' ? (settings.orders || {})[id] : null;
+    const saved = settings.saved || [];
+    if (!order || !order.length || !saved.length) return null;
+    return {list: id, order: order, saved: saved};
+  }
+  // 通信する側で次の曲へ。次が保存済みなら保存分の側へ開き直す。次も保存していない曲なら、
+  // 順番どおりのときは YouTube に任せ（false）、シャッフルのときは選んだ曲へ移る。
+  function streamStep(sc, delta, atEnd) {
+    const v = pickNext(sc.list, sc.order, delta, atEnd);
+    if (!v || v === 'end') return false;
+    if (sc.saved.includes(v)) { openSide(sc.list, v, true); return true; }
+    if (!settings.shuffle) return false;
+    const p = player(), ids = p && typeof p.getPlaylist === 'function' ? Array.from(p.getPlaylist() || []) : [];
+    const i = ids.indexOf(v);
+    if (i < 0) return false;
+    jumpedAt = Date.now();
+    pendingStep = null;
+    resumeSeek = 0;
+    log('→ ' + v + '（通信）');
+    p.playVideoAt(i);
+    return true;
   }
   // 曲順と保存済みの控え。パソコン版のプレイヤーだけが一覧を持っている。変わったら true
   function rememberLists(p) {
@@ -402,7 +442,8 @@
   function checkEnd() {
     const repeat = repeatMode();
     const vt = virtual();
-    if (!vt && !settings.shuffle && repeat === 'off') return;
+    const sc = vt ? null : streamCtx();
+    if (!vt && !sc && !settings.shuffle && repeat === 'off') return;
     const p = player();
     if (!p || !location.pathname.startsWith('/watch') || adShowing()) return;
     const state = p.getPlayerState();
@@ -415,7 +456,9 @@
       if (Date.now() - jumpedAt > 6000) restartFor = null;
       else {
         const data = p.getVideoData ? p.getVideoData() : null;
-        if (data && data.video_id === restartFor && p.getCurrentTime() > 3 && Date.now() - lastRestart > 1000) {
+        // 「途中から」＝移ってからたった時間より 3 秒以上先にいる（普通に 3 秒流れただけのときは戻さない）
+        if (data && data.video_id === restartFor && p.getCurrentTime() > (Date.now() - jumpedAt) / 1000 + 3 &&
+            Date.now() - lastRestart > 1000) {
           lastRestart = Date.now();
           log('途中（' + fmt(p.getCurrentTime()) + '）から始まったので先頭に戻す');
           p.seekTo(0, true);
@@ -444,7 +487,10 @@
       return;
     }
     if (!currentList()) return;
+    // オフライン優先で通信する側にいるとき：次が保存済みの曲なら、保存分の側へ開き直す
+    if (sc && streamStep(sc, 1, true)) return;
     if (settings.shuffle) { jumpRandom(); return; }
+    if (repeat !== 'all') return;
     // 全曲リピート：最後の曲なら先頭へ。一覧が途中までしか読み込まれていないことがあるので、本数と比べる
     const it = items(), i = it.ids.indexOf(currentVideo());
     const pl = (settings.playlists || []).find(x => x.id === currentList());
@@ -630,19 +676,55 @@
   const refreshBtn = el('button', {textContent: '⟳', title: '再生リストを取得し直す'}, tool);
   const foldBtn = el('button', {textContent: '▾', title: 'たたむ'}, tool);
   const optBtn = el('button', {textContent: '⚙', title: '設定'}, tool);
-  const prevBtn = el('button', {textContent: '⏮︎', title: '前の動画'}, big);
+  // ボタンの絵は SVG で描く。絵文字（⏯ 🔀 🔁 など）は Android では色付きの四角い絵になり、
+  // 押されたまま・何かのモード中のように見えるため。色は文字の色（currentColor）に従う。
+  const ICONS = {
+    prev: ['M6 6h2v12H6zm3.5 6l8.5 6V6z'],
+    next: ['M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z'],
+    play: ['M8 5v14l11-7z'],
+    pause: ['M6 19h4V5H6v14zm8-14v14h4V5h-4z'],
+    shuffle: ['M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5z' +
+              'm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z'],
+    repeat: ['M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z'],
+    repeat1: ['M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z', 'M13 15V9h-1l-2 1v1h1.5v4H13z']
+  };
+  function setIcon(btn, name) {
+    if (btn.dataset.icon === name) return;
+    btn.dataset.icon = name;
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '1.2em');
+    svg.setAttribute('height', '1.2em');
+    svg.style.display = 'block';
+    svg.style.margin = '0 auto';
+    svg.style.fill = 'currentColor';
+    for (const d of ICONS[name]) {
+      const path = document.createElementNS(NS, 'path');
+      path.setAttribute('d', d);
+      svg.append(path);
+    }
+    btn.replaceChildren(svg);
+  }
+  const prevBtn = el('button', {title: '前の動画'}, big);
   // 動画を見ていないとき（トップ・検索・再生リストのページなど）は、前回の動画を止めた位置から再生する
-  const playBtn = el('button', {textContent: '▶︎', title: '再生 / 一時停止（動画を見ていないときは前回の続きから）'}, big);
-  const nextBtn = el('button', {textContent: '⏭︎', title: '次の動画'}, big);
-  const shuffleBtn = el('button', {textContent: '🔀︎'}, tool);
-  const repeatBtn = el('button', {textContent: '🔁︎'}, tool);
+  const playBtn = el('button', {title: '再生 / 一時停止（動画を見ていないときは前回の続きから）'}, big);
+  const nextBtn = el('button', {title: '次の動画'}, big);
+  const shuffleBtn = el('button', {}, tool);
+  const repeatBtn = el('button', {}, tool);
+  setIcon(prevBtn, 'prev');
+  setIcon(playBtn, 'play');
+  setIcon(nextBtn, 'next');
+  setIcon(shuffleBtn, 'shuffle');
+  setIcon(repeatBtn, 'repeat');
   function paintMode() {
-    const on = {background: '#3d5a80', borderColor: '#7fb2ff'}, off = {background: '#272727', borderColor: '#444'};
+    // オンは黄色の絵と枠、オフは灰色の絵。塗りつぶしはしない
+    const on = {color: '#ffd54a', borderColor: '#ffd54a'}, off = {color: '#bbb', borderColor: '#444'};
     const repeat = repeatMode();
     Object.assign(shuffleBtn.style, settings.shuffle ? on : off);
     Object.assign(repeatBtn.style, repeat !== 'off' ? on : off);
     shuffleBtn.title = 'シャッフル: ' + (settings.shuffle ? 'オン' : 'オフ');
-    repeatBtn.textContent = repeat === 'one' ? '🔂︎' : '🔁︎';
+    setIcon(repeatBtn, repeat === 'one' ? 'repeat1' : 'repeat');
     repeatBtn.title = 'リピート: ' + ({off: 'オフ', all: '再生リスト全体', one: '1 曲'})[repeat];
   }
   function checkbox(text, title) {
@@ -667,6 +749,8 @@
   const titleB = el('span');
   titleMove.append(titleA, titleB);
   titleEl.append(titleMove);
+  // 保存分（オフライン保存）で流しているときのタイトルの色。通信しているときは白
+  const OFFLINE_COLOR = '#6fdc8c';
   let titleText = null, titleTimer = null, titleAnim = null, titleWidth = 0;
   function setTitle(text) {
     // 再生位置の桁が変わると幅が少し変わるので、少しの違いでは流し直さない
@@ -1087,22 +1171,28 @@
     showLog();
     const p = player();
     const watching = location.pathname.startsWith('/watch') && p;
-    playBtn.textContent = watching && p.getPlayerState() === 1 ? '⏸︎' : '▶︎';
+    setIcon(playBtn, watching && p.getPlayerState() === 1 ? 'pause' : 'play');
     prevBtn.disabled = nextBtn.disabled = !watching;
     prevBtn.style.opacity = nextBtn.style.opacity = watching ? '1' : '.4';
     const id = currentList(), shownId = shownList();
     if (shownId && sel.value !== shownId && [...sel.options].some(o => o.value === shownId)) sel.value = shownId;
     // 保存分で流している間：保存済みの数を出す。開いた曲が保存済みでなければ、保存済みの曲へ移る（開いたときに 1 回だけ）
     const vt = watching ? virtual() : null;
-    const offText = vt ? '保存済み ' + vt.avail.length + ' / ' + vt.order.length : '';
+    const sc = watching && !vt ? streamCtx() : null;
+    const offText = vt ? '保存分 · 保存済み ' + vt.avail.length + ' / ' + vt.order.length
+      : sc ? '通信 · 保存済み ' + sc.order.filter(v => sc.saved.includes(v)).length + ' / ' + sc.order.length : '';
+    offEl.style.color = vt ? OFFLINE_COLOR : '#aaa';
     if (offEl.textContent !== offText) offEl.textContent = offText;
     if (vt && !ensured && !adShowing()) {
       ensured = true;
-      const here = vt.avail.includes(currentVideo());
-      log('保存分で流す: 保存済み ' + vt.avail.length + ' / ' + vt.order.length + '（保存分の一覧 ' + vt.saved.length + ' 曲）' +
-          (here ? '' : '。開いた曲は保存済みでないので移る'));
-      if (!vt.avail.length) showMessage('この再生リストには保存済みの曲がありません', true);
-      else if (!here) virtualStep(vt, 1, false);
+      const cur = currentVideo(), here = vt.saved.includes(cur);
+      log('保存分で流す: 保存済み ' + vt.avail.length + ' / ' + vt.order.length + '（保存分の一覧 ' + vt.saved.length + ' 曲）');
+      // 開いた曲が保存済みでなかった（控えが古かった）ときは、控えを直して通信する側へ
+      if (!here && vt.order.includes(cur)) {
+        settings.saved = vt.saved;
+        openSide(vt.list, cur, false);
+        return;
+      }
     }
     // 曲順（通信する側）と保存済みの一覧（保存分の側）を覚える。再生が始まっていなくても覚える
     if (watching && !onMobile() && Date.now() - lastRemember > 5000) {
@@ -1141,7 +1231,8 @@
       title = (d && d.title) || document.title.replace(/ - YouTube$/, '');
       const dur = p.getDuration ? p.getDuration() : 0, t = p.getCurrentTime ? p.getCurrentTime() : 0;
       time = dur > 0 ? fmt(t) + ' / ' + fmt(dur) : (t ? fmt(t) : '');
-      titleEl.style.color = '#fff';
+      titleEl.style.color = id === 'PPSV' ? OFFLINE_COLOR : '#fff';
+      titleEl.title = (id === 'PPSV' ? '保存分で再生中（通信なし）: ' : '通信して再生中: ') + title;
     } else if (settings.last_url) {
       title = settings.last_title || '前回の続き';
       time = settings.last_time ? fmt(settings.last_time) + ' から' : '';
