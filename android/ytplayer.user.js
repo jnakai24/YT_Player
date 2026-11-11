@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.19
+// @version      0.20
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.19';
+  const VERSION = '0.20';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -286,7 +286,7 @@
   // YouTube のページのボタンには頼らず、曲の終わり（残り約 1 秒）で自分で次の曲へ移す。
   // 曲の一覧は、パソコン版はプレイヤーが持っている（getPlaylist / playVideoAt）。スマホ版はページ側の一覧のリンクを押す。
   // スマホ版の一覧は長い再生リストだと途中までしか読み込まれていないことがある。そのときは読み込まれている範囲で選ぶ。
-  let played = [], history = [], playedList = null, jumpedAt = 0, restartFor = null;
+  let played = [], history = [], playedList = null, jumpedAt = 0, restartFor = null, lastRestart = 0;
   function items() {
     const p = player();
     const ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
@@ -406,11 +406,22 @@
     const p = player();
     if (!p || !location.pathname.startsWith('/watch') || adShowing()) return;
     const state = p.getPlayerState();
+    // 保存済みの曲は、YouTube が「前回やめた位置」から始める。このスクリプトは曲の終わりの直前で次へ移るので、
+    // 一度流した曲の「前回やめた位置」はいつも終わりの直前になる。そのまま始まると、すぐ終わって次へ進み、
+    // 曲が行ったり来たりする（実機の記録で確認）。移ってから 6 秒間は見張り、途中から始まったら先頭に戻す。
+    // 位置が反映されるのは再生が始まった少しあとのことがあるので、1 回見ただけでは終わりにしない。
+    // 見張っている間は、曲の終わりの判定をしない。
     if (restartFor) {
-      if (Date.now() - jumpedAt > 8000) restartFor = null;
-      else if (currentVideo() === restartFor && state === 1) {
-        restartFor = null;
-        if (p.getCurrentTime() > 3) { log('途中から始まったので先頭に戻す'); p.seekTo(0, true); }
+      if (Date.now() - jumpedAt > 6000) restartFor = null;
+      else {
+        const data = p.getVideoData ? p.getVideoData() : null;
+        if (data && data.video_id === restartFor && p.getCurrentTime() > 3 && Date.now() - lastRestart > 1000) {
+          lastRestart = Date.now();
+          log('途中（' + fmt(p.getCurrentTime()) + '）から始まったので先頭に戻す');
+          p.seekTo(0, true);
+          if (state !== 1 && state !== 3) p.playVideo();
+        }
+        return;
       }
     }
     if (Date.now() - jumpedAt < 3000) return;
@@ -1017,8 +1028,8 @@
     const ms = pageObj(navigator).mediaSession;
     if (!ms) return;
     try {
-      ms.setActionHandler('previoustrack', pageFn(() => step(-1)));
-      ms.setActionHandler('nexttrack', pageFn(() => step(1)));
+      ms.setActionHandler('previoustrack', pageFn(() => { log('通知の ⏮'); step(-1); }));
+      ms.setActionHandler('nexttrack', pageFn(() => { log('通知の ⏭'); step(1); }));
     } catch (e) {}
   }
 
