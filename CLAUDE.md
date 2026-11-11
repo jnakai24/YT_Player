@@ -29,8 +29,8 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - `ytplayer.py` の `VERSION`（現在 0.2）がウィンドウタイトルに出る（`YT Player v0.2` / `YT Player mini v0.2`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.17）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.17 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.18）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.18 · page` と出る。
 
 ## YouTube のページに頼っている部分（壊れやすい）
 
@@ -126,7 +126,8 @@ Windows 版の YT Player（WebView2）でも保存と保存分の再生ができ
   控えは、保存分の側を開いたとき・「このリストを保存」をしたとき・スイッチをオンにした直後（`resumeTarget(true)` で確かめに行く）にできる。
 - 曲の終わりの 10 秒以内で覚えた位置は 0 秒にする（次に開いたとき、終わりの数秒だけ流れて止まるのを避ける）。
 - スマホでパソコン版の表示を開くと、**開いただけでは再生が始まらない**（▶ を押すまで「未開始」。実機の記録で確認）。0.17 から、タッチ端末の www の動画ページでは
-  スクリプトが再生を始める（`wantPlay`）。5 回頼んでも始まらなければ、理由（`playerDetail()`、`video.play()` が断られた理由）を記録に残す。
+  スクリプトが再生を始める（`wantPlay`）。**Firefox の自動再生の許可はサイトごと**で、m.youtube.com で通っていても www.youtube.com では
+  `NotAllowedError` で断られる（実機の記録で確認）。www でも「音声と動画を許可」にしてもらう必要がある（断られたらバーに案内を出す）。5 回頼んでも始まらなければ、理由（`playerDetail()`、`video.play()` が断られた理由）を記録に残す。
 - **「PC 版で開く」**（0.17）：m.youtube.com を開いたら `www.youtube.com/…?app=desktop` へ移る。設定は m の側の localStorage（`pc`）。
   URL に `app=` があるときは移らない（www から戻されたとき・「スマホ版へ」（`?app=m`）で戻ったときに、行ったり来たりしないため）。
   m と www は localStorage が別なので、位置・曲順・スイッチはそれぞれに持つ。

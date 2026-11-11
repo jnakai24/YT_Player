@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.17
+// @version      0.18
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.17';
+  const VERSION = '0.18';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -1038,7 +1038,13 @@
     if (!v) return;
     try {
       const r = v.play();
-      if (r && r.then) r.then(() => log('video.play() は通った'), e => log('video.play() が断られた: ' + e.name + ' ' + String(e.message).slice(0, 60)));
+      if (r && r.then) r.then(() => log('video.play() は通った'), e => {
+        log('video.play() が断られた: ' + e.name + ' ' + String(e.message).slice(0, 60));
+        // Firefox がこのサイトの自動再生を止めている（許可はサイトごと。m.youtube.com で許可していても www には効かない）
+        if (e.name === 'NotAllowedError') {
+          showMessage('Firefox が自動再生を止めています。▶ を押すか、アドレスバーの鍵のアイコン → 自動再生 →「音声と動画を許可」にしてください', true);
+        }
+      });
     } catch (e) { log('video.play() でエラー: ' + ((e && e.message) || e)); }
   }
   let lastSave = 0, ensured = false, lastSig = '', whyLogged = false, lastRemember = 0;
