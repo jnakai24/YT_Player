@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.14
+// @version      0.15
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.14';
+  const VERSION = '0.15';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -818,6 +818,10 @@
       .find(e => e.offsetParent !== null);
     const closeMenu = () => document.body.click();
     saving = true;
+    saveBtn.textContent = '保存を中止';
+    // YouTube が出した画面（画質の選択など）。出たら、そこで止めて利用者に任せる
+    const dialog = () => [...document.querySelectorAll('ytd-popup-container tp-yt-paper-dialog')].find(e => e.offsetParent !== null);
+    let why = '', asked = '';
     let added = 0, already = 0, failed = 0;
     const kept = new Set(settings.saved || []);
     for (let i = 0; i < rows.length && saving; i++) {
@@ -827,7 +831,7 @@
       for (let k = 0; k < 10 && shown(); k++) { closeMenu(); await wait(200); }  // 前のメニューが閉じるのを待つ
       let btn = row.querySelector('ytd-menu-renderer button');
       if (!btn) { row.scrollIntoView({block: 'nearest'}); await wait(500); btn = row.querySelector('ytd-menu-renderer button'); }
-      if (!btn || !vid) { failed++; continue; }
+      if (!btn || !vid) { failed++; why = why || 'メニューのボタンがない'; continue; }
       btn.click();
       let item = null;
       for (let k = 0; k < 15 && !item; k++) { await wait(200); item = shown(); }
@@ -836,18 +840,42 @@
         const m = item && JSON.stringify(pageObj(item).data || {}).match(/"videoId":"([\w-]{11})"/);
         if (m && m[1] !== vid) other = true;
       } catch (e) {}
-      if (!item || other) { failed++; closeMenu(); await wait(300); continue; }
-      // 見えている文字で判断する（textContent には、隠れているもう一方の項目名も入っている）
-      if (/削除|Remove/i.test(item.innerText)) { already++; closeMenu(); }
-      else { (item.querySelector('tp-yt-paper-item') || item).click(); added++; }
-      kept.add(vid);
+      if (!item || other) {
+        failed++;
+        why = why || (other ? '別の曲のメニューが出た' : 'メニューに「オフライン」の項目が出ない');
+        closeMenu();
+        await wait(300);
+        continue;
+      }
+      // 見えている文字で判断する（textContent には、隠れているもう一方の項目名も入っている）。
+      // 「オフライン」とはっきり分かるときだけ押す。保存済みの曲では同じ項目が「オフラインから削除」になっていて、押すと消えるため
+      const label = item.innerText.trim().replace(/\s+/g, ' ');
+      if (/削除|Remove/i.test(label)) { already++; kept.add(vid); closeMenu(); }
+      else if (/^(オフライン|ダウンロード|Download)$/i.test(label)) {
+        (item.querySelector('tp-yt-paper-item') || item).click();
+        added++;
+        kept.add(vid);
+        await wait(900);
+        const d = dialog();
+        if (d) { asked = d.innerText.trim().replace(/\s+/g, ' ').slice(0, 80); break; }
+      } else {
+        failed++;
+        why = why || '項目名が想定と違う「' + label.slice(0, 30) + '」';
+        closeMenu();
+      }
       await wait(700);
     }
     const stopped = !saving;
     saving = false;
     settings.saved = [...kept];
     save();
-    log('このリストを保存: 追加 ' + added + ' / 保存済み ' + already + ' / 失敗 ' + failed + ' / 全 ' + rows.length + (stopped ? '（中止）' : ''));
+    saveBtn.textContent = 'このリストを保存';
+    log('このリストを保存: 追加 ' + added + ' / 保存済み ' + already + ' / 失敗 ' + failed + ' / 全 ' + rows.length +
+        (asked ? '（YouTube の画面が出たので止めた: ' + asked + '）' : stopped ? '（中止）' : '') + (why ? ' 失敗の理由: ' + why : ''));
+    if (asked) {
+      showMessage('YouTube の画面が出ました。画質を選び、「設定を保存」にチェックして進めてから、もう一度「このリストを保存」を押してください', true);
+      return;
+    }
     showMessage((stopped ? '中止しました。' : '') + added + ' 曲の保存を始めました（保存済み ' + already + '、失敗 ' + failed +
                 '）。終わるまでこのページを開いたままにしてください', failed > 0);
   }
