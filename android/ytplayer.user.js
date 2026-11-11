@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.26
+// @version      0.27
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        window.close
 // @noframes
 // ==/UserScript==
 
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.26';
+  const VERSION = '0.27';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -879,7 +879,16 @@
   rowTitle.append(titleEl, timeEl);
   // 設定（⚙ で開く）
   const row3 = el('div', {}, {display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap'});
+  // アプリの画面（0.27。パソコン版の表示のときだけ）の切り替えと、アプリの画面のときのタブを閉じる ×
+  const appBtn = el('button', {textContent: 'アプリ', title: '動画と曲の一覧だけのアプリの画面にする'},
+                    Object.assign({}, tool, {fontSize: phone ? '15px' : 'inherit', padding: phone ? '10px 8px' : ctrl.padding}));
+  const closeBtn = el('button', {textContent: '×', title: 'このタブを閉じる'},
+                      Object.assign({}, tool, {fontSize: phone ? '24px' : '16px', color: '#f99', display: 'none', marginLeft: '6px'}));
   row1.append(sel, refreshBtn, optBtn, foldBtn);
+  if (!isMobile) row1.append(appBtn, closeBtn);
+  // 再生位置のバー（アプリの画面のときだけ出す）
+  const seekEl = el('input', {type: 'range', min: '0', max: '1000', value: '0', title: '再生位置'},
+                    {width: '100%', margin: phone ? '6px 0' : '0', accentColor: '#f33', display: 'none', boxSizing: 'border-box'});
   // 保存分で流している間の「保存済み 40 / 56」
   const offEl = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', whiteSpace: 'nowrap', textAlign: 'right',
                                 color: '#aaa', fontSize: '12px'});
@@ -906,7 +915,8 @@
   const logBtn = el('button', {textContent: '記録をコピー', title: '記録と今の状態をクリップボードにコピーする'},
                     Object.assign({}, ctrl, {fontSize: '12px'}));
   row3.append(diagBtn, logBtn, about, diagEl, logEl);
-  bar.append(row1, rowTitle, row2, info, row3);
+  bar.append(row1, rowTitle, seekEl, row2, info, row3);
+  const barCss = bar.style.cssText;
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
                      Object.assign({}, tool, {position: 'fixed', zIndex: '2147483647', right: '10px',
@@ -937,7 +947,7 @@
   //   バーの下端が見えている範囲からはみ出していたら、その分だけ上げる。
   let bottomFix = 0, loggedFix = -100, loggedWidth = -100;
   function applyZoom() {
-    if (!touch || isMobile) return;
+    if (!touch || isMobile) { placeView(1); return; }
     const vv = window.visualViewport;
     const shrink = vv && vv.scale ? 1 / vv.scale : window.innerWidth / (screen.width || window.innerWidth);
     const z = String(Math.round(Math.min(3, Math.max(1, shrink)) * 100) / 100);
@@ -946,6 +956,7 @@
       log('バーの拡大 ' + z + '（表示倍率 ' + (vv ? Math.round(vv.scale * 100) / 100 : '-') + '、ページの幅 ' + window.innerWidth +
           '、画面 ' + screen.width + '）');
     }
+    if (placeView(Number(z))) return;  // アプリの画面の中にバーを置いているときは、位置合わせはしない
     if (!vv) return;
     // 横：ページが画面より少し広く描かれていると（YouTube のパソコン版は狭い画面で右がはみ出す）、
     // ページの幅いっぱいに置いたバーは右が切れる。見えている範囲の左端と幅に合わせる。
@@ -975,8 +986,10 @@
     }
   }
   function applyFold() {
-    bar.style.display = settings.collapsed ? 'none' : 'flex';
-    openBtn.style.display = settings.collapsed ? 'block' : 'none';
+    const fold = settings.collapsed && !viewShown;  // アプリの画面ではたたまない
+    bar.style.display = fold ? 'none' : 'flex';
+    openBtn.style.display = fold ? 'block' : 'none';
+    foldBtn.style.display = viewShown ? 'none' : '';
   }
   async function refresh() {
     showMessage('取得中…');
@@ -1406,6 +1419,227 @@
     }
   }
 
+  // ---- アプリの画面（0.27。Windows 版 0.3 と同じ作り）----
+  // YouTube のページを自前の画面（#ytp-view）で覆い、動画だけを枠（slot）に重ねて見せる。操作は今のバーをそのまま中に入れる。
+  // プレイヤー要素（#movie_player）はページから動かさない。position: fixed で枠の位置・大きさにし、resize の知らせを送ると、
+  // プレイヤーが動画をその大きさで描き直す。パソコン版の表示（www）のときだけ（スマホ版はプレイヤーの作りが違う）。
+  // 「デスクトップ サイト」ではページが縮小表示されているので、画面は見えている範囲（visualViewport）に合わせ、
+  // 中のバーと曲の一覧はバーと同じ倍率で拡大する。動画の枠は同じページの座標で測るので、縮小されていてもずれない。
+  let viewShown = false, placed = '', seeking = false, listSig = '', shownCur = '', lastAppZoom = 0;
+  const view = el('div', {id: 'ytp-view'}, {
+    position: 'fixed', zIndex: '2147483000', background: '#0f0f0f', color: '#fff', display: 'none',
+    boxSizing: 'border-box', overflow: 'hidden', font: (phone ? '14px' : '13px') + ' Roboto, "Segoe UI", sans-serif'
+  });
+  const vMain = el('div', {}, {display: 'flex', flexDirection: 'column', minWidth: '0', minHeight: '0'});
+  const slot = el('div', {}, {background: '#000', flex: 'none'});
+  const ctlBox = el('div', {}, {flex: 'none'});
+  vMain.append(slot, ctlBox);
+  const side = el('div', {}, {display: 'flex', flexDirection: 'column', minWidth: '0', minHeight: '0', background: '#181818'});
+  const sideHead = el('div', {}, {padding: '8px 10px', color: '#aaa', fontSize: '12px', borderBottom: '1px solid #2a2a2a',
+                                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 'none'});
+  const listBox = el('div', {}, {flex: '1', overflowY: 'auto', minHeight: '0', overscrollBehavior: 'contain'});
+  side.append(sideHead, listBox);
+  view.append(vMain, side);
+  // 覆っている間の CSS。プレイヤーの親（#player-container）には YouTube が view-transition-name を付けていて
+  // （曲送りのたびに付け直す）、そのままだとプレイヤーが覆いの下に隠れる。:has で親すべてから外す（Windows 版で確認）。
+  const viewCss = el('style', {id: 'ytp-view-css', textContent:
+    'html.ytp-appview :has(#movie_player), html.ytp-appview #movie_player { view-transition-name: none !important; }' +
+    'html.ytp-appview, html.ytp-appview body { overflow: hidden !important; }'});
+  // YouTube は曲送りで画面切り替えのアニメーション（startViewTransition）を使う。その間は画面全体が写真に置き換わって
+  // ちらつくので、覆っている間はアニメーションせず中身だけ書き換える。ページの中で動いているときだけ（content では入れ替えられない）
+  if (!IN_CONTENT && typeof document.startViewTransition === 'function') {
+    const origTransition = document.startViewTransition;
+    document.startViewTransition = function (arg) {
+      if (!viewShown) return origTransition.apply(document, arguments);
+      const update = typeof arg === 'function' ? arg : arg && arg.update;
+      const after = Promise.resolve().then(() => update && update()).then(() => undefined);
+      return {updateCallbackDone: after, ready: after, finished: after, skipTransition() {}, types: new Set()};
+    };
+  }
+  function wantView() { return !isMobile && settings.view === 'app' && location.pathname.startsWith('/watch') && !!player(); }
+  // 画面の表示・バーの置き場所・動画の位置を今の状態に合わせる。表示していたら true
+  function placeView(z) {
+    const show = wantView();
+    if (show !== viewShown) {
+      viewShown = show;
+      document.documentElement.classList.toggle('ytp-appview', show);
+      if (show) {
+        if (!viewCss.isConnected) document.documentElement.append(viewCss);
+        ctlBox.append(bar);
+        bar.style.cssText = barCss;
+        Object.assign(bar.style, {position: 'static', left: '', right: '', bottom: '', width: 'auto', zoom: String(z),
+                                  boxShadow: 'none', border: 'none', borderRadius: '0', background: 'transparent'});
+        log('アプリの画面にした');
+      } else {
+        bar.style.cssText = barCss;
+        document.documentElement.append(bar, openBtn);
+        lastAppZoom = 0;
+        log('YouTube の画面に戻した');
+      }
+      seekEl.style.display = show ? 'block' : 'none';
+      closeBtn.style.display = show ? '' : 'none';
+      appBtn.textContent = show ? 'YouTube' : 'アプリ';
+      appBtn.title = show ? 'YouTube のページの表示に戻す' : '動画と曲の一覧だけのアプリの画面にする';
+      applyFold();
+    }
+    if (!view.isConnected) document.documentElement.append(view);
+    view.style.display = show ? 'flex' : 'none';
+    const mp = document.getElementById('movie_player');
+    if (!show) {
+      if (placed && mp) {
+        placed = '';
+        for (const k of ['position', 'left', 'top', 'width', 'height', 'zIndex']) mp.style[k] = '';
+        window.dispatchEvent(new Event('resize'));
+      }
+      return false;
+    }
+    // 見えている範囲に合わせる（デスクトップ サイトでは、ページの一部が縮小表示されている）
+    const vv = window.visualViewport;
+    const L = vv ? vv.offsetLeft : 0, T = vv ? vv.offsetTop : 0;
+    const W = vv ? vv.width : window.innerWidth, H = vv ? vv.height : window.innerHeight;
+    Object.assign(view.style, {left: L + 'px', top: T + 'px', width: W + 'px', height: H + 'px'});
+    if (bar.style.zoom !== String(z)) bar.style.zoom = String(z);
+    side.style.zoom = String(z);
+    // 縦長：動画 → 操作 → 曲の一覧。横長：左に動画と操作、右に曲の一覧
+    const portrait = W < H * 0.9;
+    view.style.flexDirection = portrait ? 'column' : 'row';
+    vMain.style.flex = portrait ? 'none' : '1';
+    side.style.flex = portrait ? '1' : 'none';
+    side.style.width = portrait ? 'auto' : Math.round(Math.min(W * 0.4, 420 * z)) / z + 'px';
+    slot.style.height = portrait ? Math.round(W * 9 / 16) + 'px' : '';
+    slot.style.flex = portrait ? 'none' : '1';
+    if (!mp) return true;
+    const r = slot.getBoundingClientRect();
+    const key = [r.left, r.top, r.width, r.height].map(Math.round).join(',');
+    if (r.width > 0 && r.height > 0 && (key !== placed || mp.style.position !== 'fixed')) {
+      placed = key;
+      Object.assign(mp.style, {position: 'fixed', left: r.left + 'px', top: r.top + 'px',
+                               width: r.width + 'px', height: r.height + 'px', zIndex: '2147483001'});
+      window.dispatchEvent(new Event('resize'));
+    }
+    if (z !== lastAppZoom) { lastAppZoom = z; log('アプリの画面 ' + Math.round(W) + 'x' + Math.round(H) + ' 拡大 ' + z + (portrait ? ' 縦' : ' 横')); }
+    return true;
+  }
+  // 曲名。ページの一覧（ytd-playlist-panel-video-renderer）から取って localStorage にも覚える
+  // （保存分の側の一覧には保存済みの曲しか出ず、ページを開き直すと消えるため）
+  const TITLES = 'ytp-titles';
+  let titleCache = {};
+  try { titleCache = JSON.parse(localStorage.getItem(TITLES) || '{}'); } catch (e) {}
+  function learnTitles() {
+    let added = 0;
+    for (const r of document.querySelectorAll('ytd-playlist-panel-video-renderer')) {
+      const a = r.querySelector('a[href*="/watch"]'), t = r.querySelector('#video-title');
+      if (!a || !t) continue;
+      let v = null;
+      try { v = new URL(a.href, location.href).searchParams.get('v'); } catch (e) {}
+      const text = t.textContent.trim();
+      if (v && text && titleCache[v] !== text) { delete titleCache[v]; titleCache[v] = text; added++; }
+    }
+    if (!added) return;
+    const keys = Object.keys(titleCache);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 1000))) delete titleCache[k];
+    try { localStorage.setItem(TITLES, JSON.stringify(titleCache)); } catch (e) {}
+  }
+  // 一覧で押した曲へ。オフライン優先のときは、保存済みなら保存分の側、保存していない曲なら通信する側で流す
+  function jumpTo(v) {
+    log('一覧で ' + v + ' を押した');
+    const vt = virtual();
+    if (vt) { if (vt.saved.includes(v)) vt.go(v); else openSide(vt.list, v, false); return; }
+    const sc = streamCtx();
+    if (sc && sc.saved.includes(v)) { openSide(sc.list, v, true); return; }
+    const it = items(), i = it.ids.indexOf(v);
+    if (i >= 0) go(it, i);
+  }
+  // 曲の一覧。オフライン優先で流しているときも、元の再生リストの曲順で出す（保存済みの曲は緑）
+  function paintViewList(p) {
+    learnTitles();
+    const vt = virtual(), sc = vt ? null : streamCtx();
+    const ids = vt ? vt.order : sc ? sc.order : (p.getPlaylist ? Array.from(p.getPlaylist() || []) : []);
+    const saved = vt ? vt.saved : sc ? sc.saved : [];
+    if (!ids.length && listSig) return;  // 曲送りの直後などで一瞬空になる。作り直さない
+    const sig = ids.join(',') + '|' + saved.length;
+    const cur = currentVideo();
+    if (sig !== listSig) {
+      listSig = sig;
+      shownCur = '';
+      listBox.replaceChildren(...ids.map((v, i) => {
+        const item = el('div', {}, {display: 'flex', gap: '10px', alignItems: 'center', padding: '6px 8px', cursor: 'pointer'});
+        item.dataset.v = v;
+        const img = el('img', {src: 'https://i.ytimg.com/vi/' + v + '/mqdefault.jpg', loading: 'lazy'},
+                       {width: '96px', height: '54px', objectFit: 'cover', borderRadius: '4px', flex: 'none', background: '#222'});
+        const name = el('div', {textContent: titleCache[v] || v},
+                        {fontSize: '13px', lineHeight: '1.35', overflow: 'hidden', display: '-webkit-box',
+                         webkitLineClamp: '2', webkitBoxOrient: 'vertical', color: saved.includes(v) ? OFFLINE_COLOR : '#fff'});
+        item.append(el('span', {textContent: String(i + 1)}, {color: '#777', fontSize: '12px', width: '22px', textAlign: 'right', flex: 'none'}), img, name);
+        item.addEventListener('click', safe(() => jumpTo(v), 'jumpTo'));
+        return item;
+      }));
+    } else {
+      for (const item of listBox.children) {
+        const t = titleCache[item.dataset.v];
+        if (t && item.lastChild.textContent !== t) item.lastChild.textContent = t;
+      }
+    }
+    if (cur !== shownCur) {
+      shownCur = cur;
+      for (const item of listBox.children) {
+        const on = item.dataset.v === cur;
+        item.style.background = on ? '#3a3a3a' : '';
+        if (on) item.scrollIntoView({block: 'nearest'});
+      }
+    }
+    const opt = sel.selectedOptions[0];
+    const n = ids.indexOf(cur) + 1;
+    sideHead.textContent = (opt && opt.value ? opt.textContent : '再生リスト') + (ids.length ? '  ·  ' + (n || '-') + ' / ' + ids.length : '') +
+      (vt ? '  ·  保存分で再生中' : sc ? '  ·  通信して再生中' : '');
+  }
+  function paintView() {
+    if (!viewShown) return;
+    const p = player();
+    if (!p) return;
+    const dur = p.getDuration ? p.getDuration() : 0, t = p.getCurrentTime ? p.getCurrentTime() : 0;
+    if (!seeking) seekEl.value = dur > 0 ? String(Math.round(t / dur * 1000)) : '0';
+    paintViewList(p);
+  }
+  seekEl.addEventListener('input', () => { seeking = true; });
+  seekEl.addEventListener('change', safe(() => {
+    const p = player();
+    if (p && p.getDuration() > 0) p.seekTo(Number(seekEl.value) / 1000 * p.getDuration(), true);
+    seeking = false;
+  }, 'seek'));
+  appBtn.addEventListener('click', safe(() => {
+    settings.view = settings.view === 'app' ? 'youtube' : 'app';
+    save();
+    if (settings.view === 'app' && !location.pathname.startsWith('/watch')) showMessage('動画を再生しているときにアプリの画面になります');
+    applyZoom();
+    paintView();
+  }, 'appBtn'));
+  // タブを閉じる。スクリプトから自分のタブを閉じられるのは、Violentmonkey の @grant window.close があるときだけ。
+  // 閉じる前に位置を覚え、止める。閉じられなかったら知らせる。
+  closeBtn.addEventListener('click', safe(() => {
+    const p = player();
+    log('× を押した');
+    if (p && location.pathname.startsWith('/watch')) {
+      const vt = virtual(), id = currentList();
+      const key = vt ? vt.list : id;
+      if (key) {
+        settings.last_url = vt ? location.origin + '/watch?v=' + currentVideo() + '&list=' + vt.list : location.href;
+        settings.last_time = Math.floor(p.getCurrentTime());
+        const positions = settings.positions = settings.positions || {};
+        positions[key] = {url: settings.last_url, time: settings.last_time, title: settings.last_title || '', at: Date.now()};
+        save();
+      }
+      p.pauseVideo();
+    }
+    window.close();
+    setTimeout(() => showMessage('タブを閉じられませんでした（Violentmonkey でスクリプトを更新すると閉じられるようになります）', true), 800);
+  }, 'close'));
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => applyZoom());
+    window.visualViewport.addEventListener('scroll', () => applyZoom());
+  }
+  setInterval(safe(paintView, 'paintView'), 500);
+
   function start() {
     bgBox.checked = !!settings.bg;
     resumeBox.checked = settings.autoresume !== false;
@@ -1418,7 +1652,9 @@
         ' 優先=' + (settings.offline ? 'オン' : 'オフ') + ' 控え=' + (settings.saved || []).length +
         (wantPlay ? ' 再生する' : '') + (resumeSeek ? ' 位置=' + resumeSeek : '') + ' 拡大=' + (bar.style.zoom || '1'));
     fill(settings.playlists, shownList() || settings.last_playlist);
-    document.documentElement.append(bar, openBtn);
+    // アプリの画面のときは、バーはもう画面の中にある（applyZoom → placeView）
+    if (viewShown) document.documentElement.append(openBtn);
+    else document.documentElement.append(bar, openBtn);
     applyFold();
     applyOpts();
     startPlayback();
