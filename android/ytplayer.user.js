@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.21
+// @version      0.22
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.21';
+  const VERSION = '0.22';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -836,8 +836,17 @@
   }
   function applyZoom() {
     if (!touch || isMobile) return;
-    const z = Math.min(3, Math.max(1, window.innerWidth / (screen.width || window.innerWidth)));
-    bar.style.zoom = openBtn.style.zoom = String(Math.round(z * 100) / 100);
+    // バーの中身は幅 400px ほどで収まる作りなので、ページが描かれている幅に合わせて拡大する。
+    // 「デスクトップ サイト」ではページが幅 980px ほどで描かれて縮小表示されるので約 2.4 倍、
+    // 画面の幅のまま描かれているとき（app=desktop で開いたときなど）は等倍になる。
+    // 画面の大きさ（screen.width）との比では決めない：ページの幅があとから変わることがあり、
+    // 古い倍率のままだと中身がバーからはみ出す（0.21 までの不具合）。毎秒測り直す。
+    const width = document.documentElement.clientWidth || window.innerWidth;
+    const z = String(Math.round(Math.min(3, Math.max(1, (width - 12) / 400)) * 100) / 100);
+    if (bar.style.zoom !== z) {
+      bar.style.zoom = openBtn.style.zoom = z;
+      log('バーの拡大 ' + z + '（ページの幅 ' + width + '、画面 ' + screen.width + '）');
+    }
   }
   function applyFold() {
     bar.style.display = settings.collapsed ? 'none' : 'flex';
@@ -1166,6 +1175,7 @@
   const startedAt = Date.now();
   function tick() { safe(tickBody, 'tick')(); }
   function tickBody() {
+    applyZoom();
     if (!bar.isConnected) document.documentElement.append(bar, openBtn);
     tryStep();
     showLog();
