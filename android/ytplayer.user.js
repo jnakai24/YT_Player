@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.16
+// @version      0.17
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.16';
+  const VERSION = '0.17';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -40,6 +40,20 @@
   const settings = load();
   function save() {
     try { localStorage.setItem(STORE, JSON.stringify(settings)); } catch (e) {}
+  }
+
+  // ---- 「PC 版で開く」：スマホ版（m.youtube.com）を開いたら、パソコン版の表示（www、app=desktop）へ移る ----
+  // オフライン保存はパソコン版の表示にしかないので、毎回手で切り替えなくて済むようにする。既定はオフ。
+  // 設定は m.youtube.com の側にある（localStorage はサイトごと）。戻すときは、パソコン版のバーの「スマホ版へ」。
+  // URL に app= があるとき（パソコン版から戻された・自分でスマホ版を選んだ）は移らない。行ったり来たりを防ぐため。
+  if (location.hostname === 'm.youtube.com' && settings.pc) {
+    const u = new URL(location.href);
+    if (!u.searchParams.has('app')) {
+      u.hostname = 'www.youtube.com';
+      u.searchParams.set('app', 'desktop');
+      location.replace(u.href);
+      return;
+    }
   }
 
   // ---- 開いたら前回の続きから流す（「開いたら続きから」がオンのとき。既定はオン） ----
@@ -117,6 +131,11 @@
       }
     }
   })();
+
+  // スマホでパソコン版の表示を開いたとき（切り替えるたびにページが読み直される）は、開いただけでは再生が始まらない
+  // ことが多い（実機の記録で、▶ を押すまで「未開始」のまま）。動画のページなら、スクリプトが再生を始める。
+  if (!wantPlay && location.hostname !== 'm.youtube.com' && location.pathname === '/watch' &&
+      window.matchMedia && window.matchMedia('(pointer: coarse)').matches) wantPlay = true;
 
   // ---- 画面を消しても再生を続ける（「裏で再生」がオンのときだけ） ----
   // YouTube はページが見えなくなったこと（document.hidden / visibilitychange）を見て再生を止めるので、
@@ -668,7 +687,12 @@
   const saveBtn = el('button', {textContent: 'このリストを保存', title: '再生中の再生リストの曲を、YouTube のオフライン保存にまとめて入れる'},
                      Object.assign({}, ctrl, {fontSize: '12px'}));
   row3.append(resumeLabel, bgLabel);
-  if (!isMobile) row3.append(offLabel, saveBtn);
+  const [pcLabel, pcBox] = checkbox('PC 版で開く', 'YouTube を開いたら、パソコン版の表示へ移る（オフライン保存を使うため）');
+  const mobileBtn = el('button', {textContent: 'スマホ版へ', title: 'スマホ版の表示（m.youtube.com）に戻る。「PC 版で開く」はそこでオフにできる'},
+                       Object.assign({}, ctrl, {fontSize: '12px'}));
+  if (isMobile) row3.append(pcLabel);
+  else row3.append(offLabel, saveBtn);
+  if (!isMobile && touch) row3.append(mobileBtn);
   // うまく動かないときに、記録（80 件）と今の状態をまとめてコピーする。チャットなどに貼って見せる
   const logBtn = el('button', {textContent: '記録をコピー', title: '記録と今の状態をクリップボードにコピーする'},
                     Object.assign({}, ctrl, {fontSize: '12px'}));
@@ -780,6 +804,17 @@
     }
   });
   bgBox.addEventListener('change', () => { settings.bg = bgBox.checked; save(); });
+  pcBox.addEventListener('change', () => {
+    settings.pc = pcBox.checked;
+    save();
+    log('PC 版で開く を' + (settings.pc ? 'オン' : 'オフ') + 'にした');
+    if (!settings.pc) return;
+    const u = new URL(location.href);
+    u.hostname = 'www.youtube.com';
+    u.searchParams.set('app', 'desktop');
+    location.href = u.href;
+  });
+  mobileBtn.addEventListener('click', () => { location.href = 'https://m.youtube.com/?app=m'; });
   // オフライン優先の切り替え。再生リストを流している最中なら、その曲のまま保存分の側 / 通信する側へ開き直す
   offBox.addEventListener('change', () => {
     const p = player(), vt = virtual(), id = currentList(), v = currentVideo();
@@ -926,7 +961,7 @@
   function startPlayback() {
     if (!wantPlay && !resumeSeek) return;
     const started = Date.now();
-    let plays = 0, seeks = 0, last = 0;
+    let plays = 0, seeks = 0, last = 0, gaveUp = false;
     const timer = setInterval(() => {
       const done = () => { clearInterval(timer); wantPlay = false; resumeSeek = 0; };
       if (Date.now() - started > 60000) { log('再生が始まらないまま 60 秒たった: ' + playerDetail()); return done(); }
@@ -944,6 +979,10 @@
           return;  // 2 秒後に、進んだか確かめる
         }
         return done();
+      }
+      if (plays === 5 && !gaveUp && Date.now() - last > 2000) {
+        gaveUp = true;  // 5 回頼んでも始まらない。理由を記録に残す
+        checkStarted();
       }
       if (!wantPlay || state === 3 || plays >= 5) return;  // 読み込み中など
       last = Date.now();
@@ -1101,6 +1140,7 @@
     bgBox.checked = !!settings.bg;
     resumeBox.checked = settings.autoresume !== false;
     offBox.checked = !!settings.offline;
+    pcBox.checked = !!settings.pc;
     paintMode();
     applyZoom();
     window.addEventListener('resize', applyZoom);
