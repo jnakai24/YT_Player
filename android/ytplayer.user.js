@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.15
+// @version      0.16
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.15';
+  const VERSION = '0.16';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -755,7 +755,7 @@
       return;
     }
     log(p.getPlayerState() === 1 ? '⏸ を押した' : '▶ を押した');
-    if (p.getPlayerState() === 1) p.pauseVideo(); else p.playVideo();
+    if (p.getPlayerState() === 1) p.pauseVideo(); else { p.playVideo(); setTimeout(safe(checkStarted, 'checkStarted'), 2500); }
     setTimeout(tick, 300);
   });
   shuffleBtn.addEventListener('click', () => { settings.shuffle = !settings.shuffle; save(); paintMode(); });
@@ -890,6 +890,7 @@
       'プレイヤー: ' + (p ? '状態 ' + p.getPlayerState() + ' / ' + fmt(p.getCurrentTime()) + ' / ' + fmt(p.getDuration()) +
                        ' / 一覧 ' + ((typeof p.getPlaylist === 'function' && p.getPlaylist()) || []).length + ' 曲' : 'なし') +
         (playerError() ? ' / エラー: ' + playerError() : ''),
+      'プレイヤーの詳細: ' + playerDetail(),
       '設定: 優先=' + !!settings.offline + ' 元のリスト=' + (settings.offline_list || '-') + ' 保存済みの控え=' + (settings.saved || []).length +
         ' 曲順の控え=' + Object.keys(settings.orders || {}).map(k => k + ':' + settings.orders[k].length).join(',') +
         ' シャッフル=' + !!settings.shuffle + ' リピート=' + repeatMode() + ' 裏で再生=' + !!settings.bg + ' 続きから=' + (settings.autoresume !== false),
@@ -928,7 +929,7 @@
     let plays = 0, seeks = 0, last = 0;
     const timer = setInterval(() => {
       const done = () => { clearInterval(timer); wantPlay = false; resumeSeek = 0; };
-      if (Date.now() - started > 60000) { log('再生が始まらないまま 60 秒たった'); return done(); }
+      if (Date.now() - started > 60000) { log('再生が始まらないまま 60 秒たった: ' + playerDetail()); return done(); }
       const p = player();
       if (!p || !p.getDuration || !(p.getDuration() > 0)) return;
       if (adShowing()) return;  // 広告の再生中
@@ -967,6 +968,39 @@
   function playerError() {
     const e = document.querySelector('#movie_player .ytp-error');
     return e && e.offsetParent !== null ? e.innerText.trim().replace(/\s+/g, ' ').slice(0, 60) : '';
+  }
+  // 再生が始まらないときの手がかり：動画のデータ、video 要素の状態、プレイヤーの状態の印、出ている画面
+  function playerDetail() {
+    const parts = [];
+    try {
+      const p = player(), box = document.getElementById('movie_player'), v = document.querySelector('#movie_player video');
+      const d = p && p.getVideoData ? p.getVideoData() : null;
+      if (d) parts.push('再生可=' + d.isPlayable + (d.errorCode ? ' errorCode=' + d.errorCode : ''));
+      if (v) {
+        parts.push('video ready=' + v.readyState + ' net=' + v.networkState + ' paused=' + v.paused + ' muted=' + v.muted +
+                   ' src=' + (v.currentSrc ? v.currentSrc.slice(0, 5) : 'なし') +
+                   (v.error ? ' error=' + v.error.code + ' ' + String(v.error.message || '').slice(0, 40) : ''));
+      } else parts.push('video 要素なし');
+      if (box) parts.push('印=' + [...box.classList].filter(c => /^(ad-|unstarted|playing|paused|buffering|ended|ytp-error|ytp-offline)/.test(c)).join(','));
+      const dlg = [...document.querySelectorAll('ytd-popup-container tp-yt-paper-dialog, ytd-popup-container yt-confirm-dialog-renderer')]
+        .find(e => e.offsetParent !== null);
+      if (dlg) parts.push('画面=' + dlg.innerText.trim().replace(/\s+/g, ' ').slice(0, 50));
+      if (playerError()) parts.push('エラー=' + playerError());
+      parts.push('online=' + navigator.onLine);
+    } catch (e) { parts.push('調べられない: ' + ((e && e.message) || e)); }
+    return parts.join(' / ');
+  }
+  // ▶ を押しても始まらないとき：手がかりを残し、video 要素に直接頼んでみる（断られた理由が分かる）
+  function checkStarted() {
+    const p = player();
+    if (!p || p.getPlayerState() === 1) return;
+    log('再生が始まらない: ' + playerDetail());
+    const v = document.querySelector('#movie_player video');
+    if (!v) return;
+    try {
+      const r = v.play();
+      if (r && r.then) r.then(() => log('video.play() は通った'), e => log('video.play() が断られた: ' + e.name + ' ' + String(e.message).slice(0, 60)));
+    } catch (e) { log('video.play() でエラー: ' + ((e && e.message) || e)); }
   }
   let lastSave = 0, ensured = false, lastSig = '', whyLogged = false, lastRemember = 0;
   const startedAt = Date.now();
