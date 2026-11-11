@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.13
+// @version      0.14
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.13';
+  const VERSION = '0.14';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -48,15 +48,17 @@
   // YouTube は、同じ動画でも watch?v=…&list=PPSV（「オフライン保存」の並び）で開くと、通信せずに保存分を再生する。
   // 元の再生リストの曲順（settings.orders）を知っているときだけ。保存済みの控え（settings.saved）があれば、保存済みの曲から始める。
   function onMobile() { return location.hostname === 'm.youtube.com'; }
-  function resumeTarget() {
+  function resumeTarget(force) {
     if (!settings.last_url) return null;
     const u = new URL(settings.last_url);
     u.searchParams.delete('pp');
     u.searchParams.delete('t');
     let time = settings.last_time || 0;
     const x = u.searchParams.get('list'), order = x && (settings.orders || {})[x];
-    if (!onMobile() && settings.offline && x !== 'PPSV' && order && order.length) {
-      const saved = settings.saved || [];
+    const saved = settings.saved || [];
+    // 保存済みの控えが空のときは、保存分の側へは行かない（行っても流せる曲がなく、次の曲へも進まない）。
+    // 控えは、保存分の側を開いたとき・「このリストを保存」をしたときにできる。スイッチをオンにした直後だけは確かめに行く（force）
+    if (!onMobile() && settings.offline && x !== 'PPSV' && order && order.length && (saved.length || force)) {
       let v = u.searchParams.get('v');
       if (saved.length && !saved.includes(v)) {
         const i = order.indexOf(v);
@@ -743,8 +745,8 @@
   refreshBtn.addEventListener('click', refresh);
   foldBtn.addEventListener('click', () => { settings.collapsed = true; save(); applyFold(); });
   openBtn.addEventListener('click', () => { settings.collapsed = false; save(); applyFold(); });
-  prevBtn.addEventListener('click', () => step(-1));
-  nextBtn.addEventListener('click', () => step(1));
+  prevBtn.addEventListener('click', () => { log('⏮ を押した'); step(-1); });
+  nextBtn.addEventListener('click', () => { log('⏭ を押した'); step(1); });
   playBtn.addEventListener('click', () => {
     const p = player();
     if (!location.pathname.startsWith('/watch') || !p) {
@@ -752,6 +754,7 @@
       if (r) { markAutoplay(r.time); location.href = r.url; }
       return;
     }
+    log(p.getPlayerState() === 1 ? '⏸ を押した' : '▶ を押した');
     if (p.getPlayerState() === 1) p.pauseVideo(); else p.playVideo();
     setTimeout(tick, 300);
   });
@@ -780,6 +783,7 @@
   // オフライン優先の切り替え。再生リストを流している最中なら、その曲のまま保存分の側 / 通信する側へ開き直す
   offBox.addEventListener('change', () => {
     const p = player(), vt = virtual(), id = currentList(), v = currentVideo();
+    if (p) rememberLists(p);  // 再生がまだ始まっていなくても、曲順はここで覚える
     settings.offline = offBox.checked;
     save();
     log('オフライン優先を' + (settings.offline ? 'オン' : 'オフ') + 'にした');
@@ -792,7 +796,7 @@
     settings.last_url = location.origin + '/watch?v=' + v + '&list=' + list;
     settings.last_time = Math.floor(p.getCurrentTime());
     save();
-    const r = resumeTarget();
+    const r = resumeTarget(true);
     markAutoplay(r.time);
     location.href = r.url;
   });
@@ -815,6 +819,7 @@
     const closeMenu = () => document.body.click();
     saving = true;
     let added = 0, already = 0, failed = 0;
+    const kept = new Set(settings.saved || []);
     for (let i = 0; i < rows.length && saving; i++) {
       showMessage('保存中 ' + (i + 1) + ' / ' + rows.length + '（もう一度押すと中止）');
       const row = rows[i], link = row.querySelector('a[href*="/watch"]');
@@ -835,10 +840,13 @@
       // 見えている文字で判断する（textContent には、隠れているもう一方の項目名も入っている）
       if (/削除|Remove/i.test(item.innerText)) { already++; closeMenu(); }
       else { (item.querySelector('tp-yt-paper-item') || item).click(); added++; }
+      kept.add(vid);
       await wait(700);
     }
     const stopped = !saving;
     saving = false;
+    settings.saved = [...kept];
+    save();
     log('このリストを保存: 追加 ' + added + ' / 保存済み ' + already + ' / 失敗 ' + failed + ' / 全 ' + rows.length + (stopped ? '（中止）' : ''));
     showMessage((stopped ? '中止しました。' : '') + added + ' 曲の保存を始めました（保存済み ' + already + '、失敗 ' + failed +
                 '）。終わるまでこのページを開いたままにしてください', failed > 0);
@@ -932,7 +940,7 @@
     const e = document.querySelector('#movie_player .ytp-error');
     return e && e.offsetParent !== null ? e.innerText.trim().replace(/\s+/g, ' ').slice(0, 60) : '';
   }
-  let lastSave = 0, ensured = false, lastSig = '', whyLogged = false;
+  let lastSave = 0, ensured = false, lastSig = '', whyLogged = false, lastRemember = 0;
   const startedAt = Date.now();
   function tick() { safe(tickBody, 'tick')(); }
   function tickBody() {
@@ -958,12 +966,28 @@
       if (!vt.avail.length) showMessage('この再生リストには保存済みの曲がありません', true);
       else if (!here) virtualStep(vt, 1, false);
     }
-    // オフライン優先なのに保存分の仕組みが動いていないとき、理由を 1 回だけ残す
-    if (watching && !vt && !whyLogged && !onMobile() && settings.offline && id === 'PPSV' && Date.now() - startedAt > 8000) {
+    // 曲順（通信する側）と保存済みの一覧（保存分の側）を覚える。再生が始まっていなくても覚える
+    if (watching && !onMobile() && Date.now() - lastRemember > 5000) {
+      lastRemember = Date.now();
+      if (rememberLists(p)) {
+        save();
+        log((id === 'PPSV' ? '保存済みの一覧' : '曲順') + 'を覚えた（' + p.getPlaylist().length + ' 曲）');
+      }
+    }
+    // 保存分の側にいるのに流せる曲がないとき（保存済みが 1 曲もない・この再生リストの曲がない）は、通信する側へ戻す。
+    // そのままだと次の曲へ進まないため。保存済みの控えを実際の一覧に合わせるので、次からは保存分の側へ行かない
+    if (watching && !whyLogged && !onMobile() && settings.offline && id === 'PPSV' && settings.offline_list &&
+        Date.now() - startedAt > 8000 && (!vt || !vt.avail.length)) {
       whyLogged = true;
       const ids = typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
-      log('保存分の仕組みが動いていない: ' + (!settings.offline_list ? '元の再生リストが分からない'
-        : !(settings.orders || {})[settings.offline_list] ? '曲順の控えがない' : 'プレイヤーの一覧が空（' + (ids ? ids.length : 'なし') + '）'));
+      const order = (settings.orders || {})[settings.offline_list];
+      log('保存分で流せない: ' + (!order ? '曲順の控えがない' : !ids || !ids.length ? '保存済みの曲がない' : 'この再生リストの曲が保存されていない') +
+          ' → 通信する側へ戻す');
+      settings.saved = ids ? Array.from(ids) : [];
+      save();
+      markAutoplay(Math.floor(p.getCurrentTime()));
+      location.href = '/watch?v=' + currentVideo() + '&list=' + settings.offline_list;
+      return;
     }
     // 動画・再生状態・エラーが変わったら残す
     const err = watching ? playerError() : '';
@@ -995,9 +1019,9 @@
       // 保存分で流している間（list=PPSV）は、元の再生リストの曲として覚える
       const key = vt ? vt.list : id;
       settings.last_url = vt ? location.origin + '/watch?v=' + currentVideo() + '&list=' + vt.list : location.href;
-      settings.last_time = Math.floor(p.getCurrentTime());
+      const whole = p.getDuration ? p.getDuration() : 0, now = p.getCurrentTime();
+      settings.last_time = whole > 0 && whole - now < 10 ? 0 : Math.floor(now);
       if (title && title !== 'YouTube') settings.last_title = title;
-      rememberLists(p);
       // 再生リストごとにも覚える（別の再生リストから戻ってきたときに続きから流す）。古いものから捨てる
       const positions = settings.positions = settings.positions || {};
       positions[key] = {url: settings.last_url, time: settings.last_time, title: settings.last_title || '', at: Date.now()};
