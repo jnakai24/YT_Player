@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.25
+// @version      0.26
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.25';
+  const VERSION = '0.26';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -303,6 +303,7 @@
     pendingStep = null;
     resumeSeek = 0;
     log('→ ' + (it.ids[i] || i) + '（' + (i + 1) + ' / ' + it.ids.length + '）');
+    if (it.source === 'player') watchMove(it.ids[i], currentList());
     it.go(i);
   }
   // まだ流していない曲から選ぶ。一巡したらやり直す
@@ -337,6 +338,7 @@
               resumeSeek = 0;
               restartFor = v;  // 保存済みの曲は前回の続きから始まることがあるので、始まったら先頭に戻す（checkEnd）
               log('→ ' + v + '（保存分 ' + (saved.indexOf(v) + 1) + ' / ' + saved.length + '、元の順 ' + (order.indexOf(v) + 1) + ' / ' + order.length + '）');
+              watchMove(v, 'PPSV');
               p.playVideoAt(saved.indexOf(v));
             }};
   }
@@ -380,6 +382,75 @@
     markAutoplay(0);
     location.href = '/watch?v=' + v + '&list=' + (savedSide ? 'PPSV' : list);
   }
+  // ---- 移った曲が流れ始めるかの見張り（0.26）----
+  // 実機の記録（0.25）：保存分の側で、ページが見えていない間に曲の終わりで playVideoAt したら、
+  // 前の曲の最後（4:02）のまま「読み込み中」（video に src なし）で止まり、画面を点けても戻らなかった。
+  // 前面でも、保存分の曲が「読み込み中」のまま始まらないことがあった。
+  // 移ってから一定時間たっても流れ始めないときは、1 回目はプレイヤーにもう一度頼み、2 回目はページを開き直す。
+  // 開き直しが続くとき（同じタブで 3 回まで）はあきらめる。
+  let moving = null;
+  function watchMove(v, list, wait) {
+    if (onMobile() || !v || !list) { moving = null; return; }
+    moving = {v: v, list: list, at: Date.now(), wait: wait || 10000, tries: 0};
+  }
+  function reopenCount(n) {
+    try {
+      if (n === undefined) return Number(sessionStorage.getItem('ytp-reopen') || 0);
+      if (n) sessionStorage.setItem('ytp-reopen', String(n)); else sessionStorage.removeItem('ytp-reopen');
+    } catch (e) {}
+    return 0;
+  }
+  function checkMove() {
+    const p = player();
+    if (!moving) {
+      if (p && p.getPlayerState() === 1 && reopenCount()) reopenCount(0);
+      return;
+    }
+    if (!location.pathname.startsWith('/watch')) { moving = null; return; }
+    if (!p) return;
+    const d = p.getVideoData ? p.getVideoData() : null, state = p.getPlayerState();
+    const here = !!d && d.video_id === moving.v;
+    // 流れ始めた。または利用者が止めた（一時停止）
+    if (here && (state === 1 || state === 2)) {
+      if (moving.tries || reopenCount()) log('移った曲が流れ始めた（やり直し ' + moving.tries + ' 回、開き直し ' + reopenCount() + ' 回）');
+      reopenCount(0);
+      moving = null;
+      return;
+    }
+    if (adShowing()) { moving.at = Date.now(); return; }
+    if (Date.now() - moving.at < moving.wait) return;
+    moving.tries++;
+    moving.at = Date.now();
+    log('移った曲が流れ始めない（' + moving.tries + ' 回目）: 今 ' + ((d && d.video_id) || '-') + ' 状態 ' + state + ' ' +
+        fmt(p.getCurrentTime()) + ' / ' + playerDetail());
+    if (moving.tries === 1) {
+      const ids = typeof p.getPlaylist === 'function' ? Array.from(p.getPlaylist() || []) : [];
+      const i = ids.indexOf(moving.v);
+      jumpedAt = Date.now();
+      if (!here && i >= 0) {
+        if (moving.list === 'PPSV') restartFor = moving.v;
+        log('→ ' + moving.v + '（もう一度移る）');
+        p.playVideoAt(i);
+      } else {
+        log('もう一度再生を頼む');
+        p.playVideo();
+      }
+      return;
+    }
+    const v = moving.v, list = moving.list, n = reopenCount() + 1;
+    moving = null;
+    // 読み込みはできていて、再生を断られているだけ（Firefox の自動再生の許可など）なら、開き直しても同じ
+    if (here && (state === -1 || state === 5)) { log('再生が始まらないまま（開き直さない）'); return; }
+    if (n > 3) { log('開き直しても流れ始めないので、あきらめる'); reopenCount(0); return; }
+    reopenCount(n);
+    log('→ ' + v + '（流れ始めないので開き直す。' + n + ' 回目）');
+    jumpedAt = Date.now();
+    pendingStep = null;
+    resumeSeek = 0;
+    markAutoplay(0);
+    location.href = '/watch?v=' + v + '&list=' + list;
+  }
+  setInterval(safe(checkMove, 'checkMove'), 1000);
   // 保存分の側で次の曲へ。保存済みならそのまま移り、保存していない曲なら通信する側へ開き直す。
   // 移ったら true。最後の曲の終わりで、全体リピートでないときは 'end'。
   function virtualStep(vt, delta, atEnd) {
@@ -411,6 +482,7 @@
     pendingStep = null;
     resumeSeek = 0;
     log('→ ' + v + '（通信）');
+    watchMove(v, sc.list);
     p.playVideoAt(i);
     return true;
   }
@@ -467,7 +539,8 @@
         return;
       }
     }
-    if (Date.now() - jumpedAt < 3000) return;
+    // 移った曲がまだ流れ始めていない間は、曲の終わりを判定しない（前の曲の「終わり」でまた移ってしまう。見張りは checkMove）
+    if (moving || Date.now() - jumpedAt < 3000) return;
     // 保存分で流している間に曲が終わってしまったとき（終わりの直前から始まったときなど）も、次の曲へ
     if (vt && state === 0) {
       log('曲が終わっていた → 次の保存済みの曲へ');
@@ -516,7 +589,7 @@
   // 止まったままにすると、音が出ていないページとして Firefox に止められ、スクリプトも動かなくなる
   // （実機の記録で、曲が終わってから 14 分間、画面を点けるまで何も動いていなかった）。
   document.addEventListener('ended', safe(function (e) {
-    if (!e.target || e.target.tagName !== 'VIDEO' || adShowing() || Date.now() - jumpedAt < 3000) return;
+    if (!e.target || e.target.tagName !== 'VIDEO' || adShowing() || moving || Date.now() - jumpedAt < 3000) return;
     const vt = virtual(), p = player();
     if (!vt || !p) return;
     if (repeatMode() === 'one') {
@@ -1137,6 +1210,8 @@
   // 利用者の一時停止とぶつからないよう、再生を試すのは 2 秒おきに 5 回まで。全体で 60 秒まで。
   function startPlayback() {
     if (!wantPlay && !resumeSeek) return;
+    // 開いた曲が流れ始めるかも見張る（読み込み中のまま止まったら、やり直す・開き直す）
+    if (wantPlay && location.pathname.startsWith('/watch')) watchMove(currentVideo(), currentList(), 20000);
     const started = Date.now();
     let plays = 0, seeks = 0, last = 0, gaveUp = false;
     const timer = setInterval(() => {
