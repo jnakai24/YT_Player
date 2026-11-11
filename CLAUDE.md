@@ -29,8 +29,8 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - `ytplayer.py` の `VERSION`（現在 0.2）がウィンドウタイトルに出る（`YT Player v0.2` / `YT Player mini v0.2`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.22）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.22 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.23）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.23 · page` と出る。
 
 ## YouTube のページに頼っている部分（壊れやすい）
 
@@ -144,8 +144,10 @@ Windows 版の YT Player（WebView2）でも保存と保存分の再生ができ
 - **見た目**：ボタンの絵は SVG で描く（`ICONS` / `setIcon()`）。絵文字（⏯ 🔀 🔁）は Android で色付きの四角い絵になり、押されたまま・モード中に見えるため。
   シャッフル・リピートは、オンが黄色の絵と枠、オフが灰色（塗りつぶさない）。タイトルは保存分で流しているとき緑（`OFFLINE_COLOR`）、通信しているとき白。
 - 「デスクトップ サイト」のときは UA がパソコンのものになるので、スマホかどうかは `(pointer: coarse)` で見分け、バーを `zoom` で拡大する（`applyZoom()`）。
-  倍率は**ページが描かれている幅**（`documentElement.clientWidth`）÷ 400 で決め、毎秒測り直す。`innerWidth / screen.width` で 1 回だけ決めていたときは、
-  ページの幅があとから画面の幅に変わると倍率が古いまま残り、中身がバーからはみ出した（0.21 の実機のスクリーンショット）。
+  倍率は**ページが縮小表示されている分**（`1 / visualViewport.scale`）で決め、毎秒測り直す。画面の幅のまま描かれているときは縦でも横でも等倍。
+  経緯：`innerWidth / screen.width` を起動時に 1 回だけ → ページの幅があとから変わると古い倍率が残ってはみ出した（0.21）。
+  ページの幅 ÷ 400 → 横向きにしただけで巨大になった（0.22）。ユーザーの希望は「横向きでも縦と同じ大きさで、幅だけ広く」。
+  Firefox の上のバーが出ている間はバーの下が切れることがあるので、下端が `visualViewport` の見えている範囲からはみ出した分だけ上げる（`bottomFix`）。
 
 ### Firefox 版の動作確認
 

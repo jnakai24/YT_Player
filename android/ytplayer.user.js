@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.22
+// @version      0.23
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.22';
+  const VERSION = '0.23';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -834,18 +834,32 @@
     sel.value = selected || '';
     if (sel.value !== (selected || '')) sel.value = '';
   }
+  // スマホでパソコン版の表示を開いたときの、バーの大きさと位置。毎秒測り直す（ページの描かれ方があとから変わるため）。
+  // 大きさ：ページが縮小表示されている分だけ拡大する（「デスクトップ サイト」では幅 980px ほどで描かれて約 0.44 倍に
+  //   縮小表示されるので、約 2.3 倍）。画面の幅のまま描かれているときは、縦でも横でも等倍。
+  //   ページの幅から決めると、横向きにしただけで巨大になる（0.22 の不具合）。
+  // 位置：Firefox の上のバー（アドレスバー）が出ている間、画面の下に固定したものは下が切れることがある。
+  //   バーの下端が見えている範囲からはみ出していたら、その分だけ上げる。
+  let bottomFix = 0, loggedFix = -100;
   function applyZoom() {
     if (!touch || isMobile) return;
-    // バーの中身は幅 400px ほどで収まる作りなので、ページが描かれている幅に合わせて拡大する。
-    // 「デスクトップ サイト」ではページが幅 980px ほどで描かれて縮小表示されるので約 2.4 倍、
-    // 画面の幅のまま描かれているとき（app=desktop で開いたときなど）は等倍になる。
-    // 画面の大きさ（screen.width）との比では決めない：ページの幅があとから変わることがあり、
-    // 古い倍率のままだと中身がバーからはみ出す（0.21 までの不具合）。毎秒測り直す。
-    const width = document.documentElement.clientWidth || window.innerWidth;
-    const z = String(Math.round(Math.min(3, Math.max(1, (width - 12) / 400)) * 100) / 100);
+    const vv = window.visualViewport;
+    const shrink = vv && vv.scale ? 1 / vv.scale : window.innerWidth / (screen.width || window.innerWidth);
+    const z = String(Math.round(Math.min(3, Math.max(1, shrink)) * 100) / 100);
     if (bar.style.zoom !== z) {
       bar.style.zoom = openBtn.style.zoom = z;
-      log('バーの拡大 ' + z + '（ページの幅 ' + width + '、画面 ' + screen.width + '）');
+      log('バーの拡大 ' + z + '（表示倍率 ' + (vv ? Math.round(vv.scale * 100) / 100 : '-') + '、ページの幅 ' + window.innerWidth +
+          '、画面 ' + screen.width + '）');
+    }
+    if (!vv || settings.collapsed) return;
+    const over = bar.getBoundingClientRect().bottom - (vv.offsetTop + vv.height) + 6;  // 見えている下端から 6px 上に置きたい
+    if (Math.abs(over) <= 2) return;
+    bottomFix = Math.max(0, Math.min(200, bottomFix + over / Number(z)));
+    bar.style.bottom = (6 + bottomFix) + 'px';
+    openBtn.style.bottom = (14 + bottomFix) + 'px';
+    if (Math.abs(bottomFix - loggedFix) > 10) {
+      loggedFix = bottomFix;
+      log('バーの位置を ' + Math.round(bottomFix) + 'px 上げた（見えている高さ ' + Math.round(vv.height) + '、ページの高さ ' + window.innerHeight + '）');
     }
   }
   function applyFold() {
@@ -1189,8 +1203,9 @@
     // 保存分で流している間：保存済みの数を出す。開いた曲が保存済みでなければ、保存済みの曲へ移る（開いたときに 1 回だけ）
     const vt = watching ? virtual() : null;
     const sc = watching && !vt ? streamCtx() : null;
-    const offText = vt ? '保存分 · 保存済み ' + vt.avail.length + ' / ' + vt.order.length
-      : sc ? '通信 · 保存済み ' + sc.order.filter(v => sc.saved.includes(v)).length + ' / ' + sc.order.length : '';
+    // 「保存分 54/56」＝保存分で再生中、56 曲のうち 54 曲が保存済み。「通信 54/56」＝通信して再生中
+    const offText = vt ? '保存分 ' + vt.avail.length + '/' + vt.order.length
+      : sc ? '通信 ' + sc.order.filter(v => sc.saved.includes(v)).length + '/' + sc.order.length : '';
     offEl.style.color = vt ? OFFLINE_COLOR : '#aaa';
     if (offEl.textContent !== offText) offEl.textContent = offText;
     if (vt && !ensured && !adShowing()) {
