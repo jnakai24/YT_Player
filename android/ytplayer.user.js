@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.23
+// @version      0.24
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.23';
+  const VERSION = '0.24';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -840,7 +840,7 @@
   //   ページの幅から決めると、横向きにしただけで巨大になる（0.22 の不具合）。
   // 位置：Firefox の上のバー（アドレスバー）が出ている間、画面の下に固定したものは下が切れることがある。
   //   バーの下端が見えている範囲からはみ出していたら、その分だけ上げる。
-  let bottomFix = 0, loggedFix = -100;
+  let bottomFix = 0, loggedFix = -100, loggedWidth = -100;
   function applyZoom() {
     if (!touch || isMobile) return;
     const vv = window.visualViewport;
@@ -851,7 +851,24 @@
       log('バーの拡大 ' + z + '（表示倍率 ' + (vv ? Math.round(vv.scale * 100) / 100 : '-') + '、ページの幅 ' + window.innerWidth +
           '、画面 ' + screen.width + '）');
     }
-    if (!vv || settings.collapsed) return;
+    if (!vv) return;
+    // 横：ページが画面より少し広く描かれていると（YouTube のパソコン版は狭い画面で右がはみ出す）、
+    // ページの幅いっぱいに置いたバーは右が切れる。見えている範囲の左端と幅に合わせる。
+    const zn = Number(z);
+    const left = Math.round((vv.offsetLeft + 6) / zn), width = Math.round((vv.width - 12) / zn);
+    const page = document.documentElement.clientWidth || window.innerWidth;
+    const right = Math.round((Math.max(0, page - vv.offsetLeft - vv.width) + 10) / zn);
+    if (bar.style.left !== left + 'px' || bar.style.width !== width + 'px') {
+      bar.style.right = 'auto';
+      bar.style.left = left + 'px';
+      bar.style.width = width + 'px';
+      openBtn.style.right = right + 'px';
+      if (Math.abs(width - loggedWidth) > 10) {
+        loggedWidth = width;
+        log('バーの幅 ' + width + 'px（見えている幅 ' + Math.round(vv.width) + '、ページの幅 ' + page + '、左 ' + Math.round(vv.offsetLeft) + '）');
+      }
+    }
+    if (settings.collapsed) return;
     const over = bar.getBoundingClientRect().bottom - (vv.offsetTop + vv.height) + 6;  // 見えている下端から 6px 上に置きたい
     if (Math.abs(over) <= 2) return;
     bottomFix = Math.max(0, Math.min(200, bottomFix + over / Number(z)));

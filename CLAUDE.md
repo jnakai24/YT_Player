@@ -29,8 +29,8 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - `ytplayer.py` の `VERSION`（現在 0.2）がウィンドウタイトルに出る（`YT Player v0.2` / `YT Player mini v0.2`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.23）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.23 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.24）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.24 · page` と出る。
 
 ## YouTube のページに頼っている部分（壊れやすい）
 
@@ -148,6 +148,8 @@ Windows 版の YT Player（WebView2）でも保存と保存分の再生ができ
   経緯：`innerWidth / screen.width` を起動時に 1 回だけ → ページの幅があとから変わると古い倍率が残ってはみ出した（0.21）。
   ページの幅 ÷ 400 → 横向きにしただけで巨大になった（0.22）。ユーザーの希望は「横向きでも縦と同じ大きさで、幅だけ広く」。
   Firefox の上のバーが出ている間はバーの下が切れることがあるので、下端が `visualViewport` の見えている範囲からはみ出した分だけ上げる（`bottomFix`）。
+  横も同じで、YouTube のパソコン版は狭い画面だとページが画面より少し広く描かれ（右上のアイコンが切れる）、ページの幅いっぱいのバーは右が切れる。
+  バーの左端と幅は `visualViewport` の `offsetLeft` / `width` に合わせる（0.24）。
 
 ### Firefox 版の動作確認
 
