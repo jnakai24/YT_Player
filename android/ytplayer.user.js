@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.28
+// @version      0.29
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.28';
+  const VERSION = '0.29';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -40,6 +40,34 @@
   const settings = load();
   function save() {
     try { localStorage.setItem(STORE, JSON.stringify(settings)); } catch (e) {}
+  }
+
+  // ---- アプリの画面のときの目隠し（0.29）----
+  // 保存分 ↔ 通信の切り替わりなどでページを開き直すと、アプリの画面が出るまで（約 1 秒）YouTube のページが見えてちらつく（0.28 の実機）。
+  // スクリプトはページの読み込みの最初（document-start）に動くので、アプリの画面にしているなら、すぐに黒で覆っておき、
+  // アプリの画面が出て動画を枠に置いたら外す（placeView → dropCover）。出ないまま 15 秒たったら外す。
+  // 読み込みの本当に最初は <html> 要素もまだないことがある（PC で document-start に入れて確認）。できるのを待って置く。
+  let cover = null;
+  if (location.hostname === 'www.youtube.com' && settings.view === 'app' && location.pathname.startsWith('/watch')) {
+    cover = document.createElement('div');
+    cover.id = 'ytp-cover';
+    cover.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;min-width:100%;min-height:100%;' +
+                          'z-index:2147483647;background:#0f0f0f;pointer-events:none';
+    const put = () => {
+      if (!cover) return;
+      document.documentElement.append(cover);
+      document.documentElement.style.background = '#0f0f0f';
+    };
+    if (document.documentElement) put();
+    else new MutationObserver((m, o) => { if (document.documentElement) { o.disconnect(); put(); } })
+      .observe(document, {childList: true});
+    setTimeout(() => dropCover(), 15000);
+  }
+  function dropCover() {
+    if (!cover) return;
+    cover.remove();
+    cover = null;
+    if (document.documentElement) document.documentElement.style.background = '';
   }
 
   // ---- 動画のデータをどれだけ通信で取ったか（保存分で流せているかの確かめ用） ----
@@ -1492,6 +1520,7 @@
     view.style.display = show ? 'flex' : 'none';
     const mp = document.getElementById('movie_player');
     if (!show) {
+      if (settings.view !== 'app' || !location.pathname.startsWith('/watch')) dropCover();
       if (placed && mp) {
         placed = '';
         for (const k of ['position', 'left', 'top', 'width', 'height', 'zIndex']) mp.style[k] = '';
@@ -1507,13 +1536,18 @@
     if (bar.style.zoom !== String(z)) bar.style.zoom = String(z);
     side.style.zoom = String(z);
     // 縦長：動画 → 操作 → 曲の一覧。横長：左に動画と操作、右に曲の一覧
+    // ⚙ で記録などを出すと操作の部分が縦に長くなる。そのままだと横長では動画の枠が潰れ（高さ 19px まで。0.29 の実機で
+    // 「大きくずれた」）、縦長では曲の一覧が消える。動画の枠と一覧に最低限の高さを持たせ、操作の部分は中でスクロールさせる。
     const portrait = W < H * 0.9;
     view.style.flexDirection = portrait ? 'column' : 'row';
-    vMain.style.flex = portrait ? 'none' : '1';
-    side.style.flex = portrait ? '1' : 'none';
+    vMain.style.flex = portrait ? '0 1 auto' : '1 1 0';
+    side.style.flex = portrait ? '1 1 0' : 'none';
+    side.style.minHeight = portrait ? Math.round(H * 0.2 / z) + 'px' : '0';
     side.style.width = portrait ? 'auto' : Math.round(Math.min(W * 0.4, 420 * z)) / z + 'px';
     slot.style.height = portrait ? Math.round(W * 9 / 16) + 'px' : '';
-    slot.style.flex = portrait ? 'none' : '1';
+    slot.style.minHeight = portrait ? '' : Math.round(H * 0.45) + 'px';
+    slot.style.flex = portrait ? 'none' : '1 1 0';
+    Object.assign(ctlBox.style, {flex: '0 1 auto', minHeight: '0', overflowY: 'auto', overscrollBehavior: 'contain'});
     if (!mp) return true;
     const r = slot.getBoundingClientRect();
     const key = [r.left, r.top, r.width, r.height].map(Math.round).join(',');
@@ -1524,6 +1558,7 @@
       window.dispatchEvent(new Event('resize'));
     }
     if (z !== lastAppZoom) { lastAppZoom = z; log('アプリの画面 ' + Math.round(W) + 'x' + Math.round(H) + ' 拡大 ' + z + (portrait ? ' 縦' : ' 横')); }
+    if (cover && placed) dropCover();  // 動画を枠に置いたので目隠しを外す
     return true;
   }
   // 曲名。ページの一覧（ytd-playlist-panel-video-renderer）から取って localStorage にも覚える
@@ -1624,8 +1659,17 @@
     if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
     const req = document.documentElement.requestFullscreen;
     if (!req) { showMessage('この Firefox では全画面にできません', true); return; }
+    // Firefox は動画を含むものを全画面にすると、向きを横に固定することがある（0.28 の実機：縦で押しても横の全画面になった）。
+    // 全画面になったら、押したときの向きに固定し直す（全画面をやめると固定も外れる）。
+    const vv = window.visualViewport;
+    const want = (vv ? vv.width < vv.height : innerWidth < innerHeight) ? 'portrait' : 'landscape';
     document.documentElement.requestFullscreen({navigationUI: 'hide'})
-      .then(() => log('全画面にした'), e => { log('全画面にできない: ' + e.name + ' ' + e.message); showMessage('全画面にできませんでした', true); });
+      .then(() => {
+        const o = screen.orientation;
+        if (!o || typeof o.lock !== 'function') { log('全画面にした（向きは固定できない）'); return; }
+        return o.lock(want).then(() => log('全画面にした（' + (want === 'portrait' ? '縦' : '横') + 'に固定）'),
+                                 e => log('全画面にした（向きを固定できない: ' + e.name + ' ' + e.message + '）'));
+      }, e => { log('全画面にできない: ' + e.name + ' ' + e.message); showMessage('全画面にできませんでした', true); });
   }, 'full'));
   document.addEventListener('fullscreenchange', () => {
     fullBtn.title = document.fullscreenElement ? '全画面をやめる' : '全画面';
@@ -1655,6 +1699,21 @@
     window.visualViewport.addEventListener('resize', () => applyZoom());
     window.visualViewport.addEventListener('scroll', () => applyZoom());
   }
+  // 動画の枠の大きさが変わったら（記録が増えた・回転したなど）すぐ動画を置き直す。1 秒ごとの見直しを待たない
+  if (window.ResizeObserver) {
+    let queued = false;
+    new ResizeObserver(() => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; safe(applyZoom, 'applyZoom')(); });
+      setTimeout(() => { if (queued) { queued = false; safe(applyZoom, 'applyZoom')(); } }, 300);  // 描画が止まっているとき
+    }).observe(slot);
+  }
+  // 回転・裏から表に戻ったときは、画面の大きさが何度か変わってから落ち着く。少し間をおいて何度か置き直す
+  const settle = () => { for (const ms of [150, 500, 1200]) setTimeout(safe(applyZoom, 'applyZoom'), ms); };
+  window.addEventListener('orientationchange', settle);
+  window.addEventListener('focus', settle);
+  document.addEventListener('visibilitychange', () => { if (!realHidden.call(document)) settle(); });
   setInterval(safe(paintView, 'paintView'), 500);
 
   function start() {
@@ -1672,6 +1731,7 @@
     // アプリの画面のときは、バーはもう画面の中にある（applyZoom → placeView）
     if (viewShown) document.documentElement.append(openBtn);
     else document.documentElement.append(bar, openBtn);
+    if (cover) document.documentElement.append(cover);  // 目隠しはバーより上に（同じ重なり順なので後ろに置く）
     applyFold();
     applyOpts();
     startPlayback();
