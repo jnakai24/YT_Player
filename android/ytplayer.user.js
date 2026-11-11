@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.24
+// @version      0.25
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.24';
+  const VERSION = '0.25';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -288,7 +288,7 @@
   // YouTube のページのボタンには頼らず、曲の終わり（残り約 1 秒）で自分で次の曲へ移す。
   // 曲の一覧は、パソコン版はプレイヤーが持っている（getPlaylist / playVideoAt）。スマホ版はページ側の一覧のリンクを押す。
   // スマホ版の一覧は長い再生リストだと途中までしか読み込まれていないことがある。そのときは読み込まれている範囲で選ぶ。
-  let played = [], history = [], playedList = null, jumpedAt = 0, restartFor = null, lastRestart = 0;
+  let played = [], history = [], playedList = null, jumpedAt = 0, restartFor = null, lastRestart = 0, lastCheck = 0;
   function items() {
     const p = player();
     const ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
@@ -476,7 +476,12 @@
       return;
     }
     const d = p.getDuration(), t = p.getCurrentTime();
-    if (!(d > 0) || state !== 1 || d - t > 1.2) return;
+    // 画面を消している間などは、この確認が数秒おきにしか動かないことがある（実機の記録で、曲が終わってから気づいていた）。
+    // 前回の確認から間が空いているときは、その分だけ早めに「終わり」とみなす（最大 5 秒前）。
+    const gap = Date.now() - lastCheck;
+    lastCheck = Date.now();
+    const lead = 1.2 + (gap > 600 ? Math.min(3.8, gap / 1000) : 0);
+    if (!(d > 0) || state !== 1 || d - t > lead) return;
     const data = p.getVideoData ? p.getVideoData() : null;
     if (data && data.isLive) return;  // ライブ配信はいつも「終わりの直前」に見える
     if (repeat === 'one') { jumpedAt = Date.now(); p.seekTo(0, true); return; }
@@ -507,6 +512,23 @@
       }
     };
   }
+  // 保存分で流している間に曲が最後まで行ってしまったら、その場で次の曲へ移る。
+  // 止まったままにすると、音が出ていないページとして Firefox に止められ、スクリプトも動かなくなる
+  // （実機の記録で、曲が終わってから 14 分間、画面を点けるまで何も動いていなかった）。
+  document.addEventListener('ended', safe(function (e) {
+    if (!e.target || e.target.tagName !== 'VIDEO' || adShowing() || Date.now() - jumpedAt < 3000) return;
+    const vt = virtual(), p = player();
+    if (!vt || !p) return;
+    if (repeatMode() === 'one') {
+      jumpedAt = Date.now();
+      p.seekTo(0, true);
+      p.playVideo();
+      return;
+    }
+    log('曲が最後まで行った → すぐ次へ');
+    virtualStep(vt, 1, true);
+    jumpedAt = Date.now();
+  }, 'ended'), true);
   document.addEventListener('timeupdate', safe(checkEnd, 'checkEnd'), true);
   setInterval(safe(checkEnd, 'checkEnd'), 250);
   function currentList() {
@@ -1247,13 +1269,16 @@
     // 保存分の側にいるのに流せる曲がないとき（保存済みが 1 曲もない・この再生リストの曲がない）は、通信する側へ戻す。
     // そのままだと次の曲へ進まないため。保存済みの控えを実際の一覧に合わせるので、次からは保存分の側へ行かない
     if (watching && !whyLogged && !onMobile() && settings.offline && id === 'PPSV' && settings.offline_list &&
-        Date.now() - startedAt > 8000 && (!vt || !vt.avail.length)) {
+        Date.now() - startedAt > 8000 && (!vt || !vt.avail.length) &&
+        (p.getPlayerState() === 1 || p.getPlayerState() === 2)) {
+      // ↑ 再生できている（再生中・停止中）ときだけ判断する。読み込みが終わっていない間はプレイヤーの一覧がまだ空で、
+      //   「保存済みの曲がない」と誤って判断して控えを消してしまう（0.24 の実機の記録）
       whyLogged = true;
       const ids = typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
       const order = (settings.orders || {})[settings.offline_list];
       log('保存分で流せない: ' + (!order ? '曲順の控えがない' : !ids || !ids.length ? '保存済みの曲がない' : 'この再生リストの曲が保存されていない') +
           ' → 通信する側へ戻す');
-      settings.saved = ids ? Array.from(ids) : [];
+      if (ids) settings.saved = Array.from(ids);  // 一覧が読めたときだけ、控えを実際の一覧に合わせる
       save();
       markAutoplay(Math.floor(p.getCurrentTime()));
       location.href = '/watch?v=' + currentVideo() + '&list=' + settings.offline_list;
