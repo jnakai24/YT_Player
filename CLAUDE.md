@@ -29,12 +29,12 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - `ytplayer.py` の `VERSION`（現在 0.3）がウィンドウタイトルに出る（`YT Player v0.3` / `YT Player mini v0.3`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.27）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.27 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.28）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.28 · page` と出る。
 
 ## 今の状況（2026-11-11 時点。変わったら書き直す）
 
-Windows 版 0.3、Firefox 版 0.27。どちらも main に push 済み（0.27 のアプリの画面と × は実機で未確認）。細かい仕組みと経緯は、下のそれぞれの節にある。
+Windows 版 0.3、Firefox 版 0.28。どちらも main に push 済み（0.28 の全画面と × は実機で未確認）。細かい仕組みと経緯は、下のそれぞれの節にある。
 
 ### 実機で確かめたこと
 
@@ -211,7 +211,7 @@ Windows 版の YT Player（WebView2）でも保存と保存分の再生ができ
   横も同じで、YouTube のパソコン版は狭い画面だとページが画面より少し広く描かれ（右上のアイコンが切れる）、ページの幅いっぱいのバーは右が切れる。
   バーの左端と幅は `visualViewport` の `offsetLeft` / `width` に合わせる（0.24）。
 
-### アプリの画面（Firefox 版 0.27。www のときだけ）
+### アプリの画面（Firefox 版 0.27〜。www のときだけ）
 
 - Windows 版 0.3 と同じ作り（`#ytp-view` で覆い、`#movie_player` を枠に固定、`:has` の CSS で view-transition-name を外す、
   ページの中で動いているときは `startViewTransition` をアニメーションなしにする）。クラス名は `ytp-appview`（Windows 版と別）。
@@ -219,7 +219,11 @@ Windows 版の YT Player（WebView2）でも保存と保存分の再生ができ
   縦長は「動画 → 操作 → 一覧」、横長は「左に動画と操作、右に一覧」。設定は `settings.view`（`app` / `youtube`）。
 - 曲の一覧はオフライン優先のときも元の再生リストの順（保存済みは緑）。押すと `jumpTo()`（保存分 / 通信のどちらの側で流すかも選ぶ）。
   曲名はページの一覧から取って localStorage `ytp-titles` に 1000 件まで覚える。
-- × はタブを閉じる（`@grant window.close`。Violentmonkey の機能。0.26 までは `@grant none`）。閉じる前に位置を覚えて止める。
+- 0.27 の実機：縦・横とも並びは期待どおり。開いた直後は表示倍率 0.44 → 1（ページの幅 445）に変わる（覆ってページのスクロールを止めたため）。
+- × は位置を覚えて止め、`about:blank` へ移る（音も通知も消える。タブは残る）。0.27 は `@grant window.close` でタブを閉じていたが、
+  タブが 1 つだけのとき Firefox が固まった（実機）ので外した（`@grant none` に戻した）。
+- ⛶ で全画面（`requestFullscreen`、タップしたときだけ頼める）。Firefox のアドレスバー（白い帯）が消える。PC の YT Player（WebView2）は全画面を許さないので試せない。
+  覆っている間はページの背景も黒（横向きの右端に白い隙間が見えていた）。アプリの画面では ⟳ を隠す（上の行が窮屈なため）。
 - PC の YT Player では、CDP の `Emulation.setDeviceMetricsOverride`（mobile, 432x900）と `setTouchEmulationEnabled` でスマホの縦横の並びは確かめられる。
   ただし Chromium では「幅 980 で描いて縮小表示」（visualViewport.scale 0.44）にはならないので、その倍率での見え方は実機でしか分からない。
 

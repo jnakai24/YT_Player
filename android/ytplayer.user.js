@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.27
+// @version      0.28
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
 // @run-at       document-start
-// @grant        window.close
+// @grant        none
 // @noframes
 // ==/UserScript==
 
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.27';
+  const VERSION = '0.28';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -882,10 +882,13 @@
   // アプリの画面（0.27。パソコン版の表示のときだけ）の切り替えと、アプリの画面のときのタブを閉じる ×
   const appBtn = el('button', {textContent: 'アプリ', title: '動画と曲の一覧だけのアプリの画面にする'},
                     Object.assign({}, tool, {fontSize: phone ? '15px' : 'inherit', padding: phone ? '10px 8px' : ctrl.padding}));
-  const closeBtn = el('button', {textContent: '×', title: 'このタブを閉じる'},
+  const closeBtn = el('button', {textContent: '×', title: '止めて、YouTube のページを閉じる'},
                       Object.assign({}, tool, {fontSize: phone ? '24px' : '16px', color: '#f99', display: 'none', marginLeft: '6px'}));
+  // 全画面（Firefox のアドレスバーと Android のバーを隠す）。全画面はタップしたときにしか頼めないのでボタンにする
+  const fullBtn = el('button', {textContent: '⛶', title: '全画面'},
+                     Object.assign({}, tool, {fontSize: phone ? '22px' : '15px', display: 'none'}));
   row1.append(sel, refreshBtn, optBtn, foldBtn);
-  if (!isMobile) row1.append(appBtn, closeBtn);
+  if (!isMobile) row1.append(appBtn, fullBtn, closeBtn);
   // 再生位置のバー（アプリの画面のときだけ出す）
   const seekEl = el('input', {type: 'range', min: '0', max: '1000', value: '0', title: '再生位置'},
                     {width: '100%', margin: phone ? '6px 0' : '0', accentColor: '#f33', display: 'none', boxSizing: 'border-box'});
@@ -1444,7 +1447,8 @@
   // （曲送りのたびに付け直す）、そのままだとプレイヤーが覆いの下に隠れる。:has で親すべてから外す（Windows 版で確認）。
   const viewCss = el('style', {id: 'ytp-view-css', textContent:
     'html.ytp-appview :has(#movie_player), html.ytp-appview #movie_player { view-transition-name: none !important; }' +
-    'html.ytp-appview, html.ytp-appview body { overflow: hidden !important; }'});
+    'html.ytp-appview, html.ytp-appview body { overflow: hidden !important; background: #0f0f0f !important; }'});
+  // ↑ 背景も黒にする。覆いきれていない隙間（横向きの右端など）に YouTube のページの白い背景が見えていた（0.27 の実機）
   // YouTube は曲送りで画面切り替えのアニメーション（startViewTransition）を使う。その間は画面全体が写真に置き換わって
   // ちらつくので、覆っている間はアニメーションせず中身だけ書き換える。ページの中で動いているときだけ（content では入れ替えられない）
   if (!IN_CONTENT && typeof document.startViewTransition === 'function') {
@@ -1477,7 +1481,9 @@
         log('YouTube の画面に戻した');
       }
       seekEl.style.display = show ? 'block' : 'none';
-      closeBtn.style.display = show ? '' : 'none';
+      closeBtn.style.display = fullBtn.style.display = show ? '' : 'none';
+      refreshBtn.style.display = show ? 'none' : '';  // 縦向きで上の行が窮屈になるため。一覧はページを開くたびに取り直している
+      if (!show && document.fullscreenElement) document.exitFullscreen().catch(() => {});
       appBtn.textContent = show ? 'YouTube' : 'アプリ';
       appBtn.title = show ? 'YouTube のページの表示に戻す' : '動画と曲の一覧だけのアプリの画面にする';
       applyFold();
@@ -1614,8 +1620,19 @@
     applyZoom();
     paintView();
   }, 'appBtn'));
-  // タブを閉じる。スクリプトから自分のタブを閉じられるのは、Violentmonkey の @grant window.close があるときだけ。
-  // 閉じる前に位置を覚え、止める。閉じられなかったら知らせる。
+  fullBtn.addEventListener('click', safe(() => {
+    if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
+    const req = document.documentElement.requestFullscreen;
+    if (!req) { showMessage('この Firefox では全画面にできません', true); return; }
+    document.documentElement.requestFullscreen({navigationUI: 'hide'})
+      .then(() => log('全画面にした'), e => { log('全画面にできない: ' + e.name + ' ' + e.message); showMessage('全画面にできませんでした', true); });
+  }, 'full'));
+  document.addEventListener('fullscreenchange', () => {
+    fullBtn.title = document.fullscreenElement ? '全画面をやめる' : '全画面';
+    setTimeout(() => applyZoom(), 300);  // 見えている範囲が変わる
+  });
+  // ×：位置を覚えて止め、空のページ（about:blank）へ移る。YouTube のページがなくなるので、音も通知も消える。
+  // 0.27 はタブを閉じていた（@grant window.close）が、タブが 1 つだけのとき Firefox が固まった（実機）。タブは残す。
   closeBtn.addEventListener('click', safe(() => {
     const p = player();
     log('× を押した');
@@ -1631,8 +1648,8 @@
       }
       p.pauseVideo();
     }
-    window.close();
-    setTimeout(() => showMessage('タブを閉じられませんでした（Violentmonkey でスクリプトを更新すると閉じられるようになります）', true), 800);
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    location.href = 'about:blank';
   }, 'close'));
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', () => applyZoom());
