@@ -26,7 +26,7 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 
 ## バージョン
 
-- `ytplayer.py` の `VERSION`（現在 0.2）がウィンドウタイトルに出る（`YT Player v0.2` / `YT Player mini v0.2`）。
+- `ytplayer.py` の `VERSION`（現在 0.3）がウィンドウタイトルに出る（`YT Player v0.3` / `YT Player mini v0.3`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
 - Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.26）を**両方**上げる。
@@ -34,7 +34,7 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 
 ## 今の状況（2026-11-11 時点。変わったら書き直す）
 
-Windows 版 0.2（main に push 済み）、Firefox 版 0.26（未 push。0.25 は push 済み）。細かい仕組みと経緯は、下のそれぞれの節にある。
+Windows 版 0.3（未コミット。0.2 は push 済み）、Firefox 版 0.26（main に push 済み）。細かい仕組みと経緯は、下のそれぞれの節にある。
 
 ### 実機で確かめたこと
 
@@ -101,6 +101,16 @@ Windows 版 0.2（main に push 済み）、Firefox 版 0.26（未 push。0.25 �
 - YouTube は曲送りでページを読み直さない（URL だけ書き換える）ので、pywebview の `get_current_url()` は 1 曲目のまま。
   再生位置はページから 5 秒ごとに `report_position` で受け取って保存している。
 - youtube.com は Trusted Types を使うので、注入する JS で `innerHTML` は使えない。DOM を組み立てる。
+
+- **アプリの画面**（Windows 版 0.3。バーの「アプリ」/「YouTube」で切り替え、settings の `view`）：YouTube のページを `#ytp-view` で覆い、
+  `#movie_player` を `position: fixed` で枠（slot）の位置・大きさにして `resize` を送る（プレイヤーが動画をその大きさで描き直す）。要素は動かさない。
+  **`#player-container` に YouTube が `view-transition-name` を付けていて、そのままだとプレイヤーが覆いの下に隠れる**。曲送りのたびに名前を付け直すので、
+  要素の style ではなく CSS（`html.ytp-app-view :has(#movie_player)` に `none !important`）で外す。
+  また YouTube は曲送りで `document.startViewTransition` を使い、その間は画面全体が写真に置き換わってちらつくので、覆っている間はアニメーションなしで中身だけ書き換える。
+  曲の一覧は、曲送りの間に曲名が取れない・`getPlaylist()` が一瞬空になるので、並びが変わったときだけ作り直す（曲名は覚えておく）。曲名はページの一覧（`ytd-playlist-panel-video-renderer`）、サムネイルは `i.ytimg.com/vi/ID/mqdefault.jpg`。
+  **再生リストの切り替え**（バー・ミニとも）はページを読み直さず、`ytd-app` に `yt-navigate`（`watchEndpoint` に videoId / playlistId / startTimeSeconds）を送る（`openWatch()`）。
+  読み直すと YouTube のページが見えてちらつくため。3 秒たっても移れていなければ読み直す。ミニからは `window.__ytp.open(url)`、なければ `load_url`。
+  覆っている間は本体のバーを画面の下に組み込み、ページのスクロールを止める。動画のページ以外では覆わない。Firefox 版にはまだない。
 
 ## pywebview / WebView2 の注意点（実機で確認済み）
 

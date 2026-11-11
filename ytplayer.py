@@ -24,7 +24,7 @@ TOKEN_FILE = DATA_DIR / "token.json"
 CLIENT_SECRET_FILE = APP_DIR / "client_secret.json"
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
-VERSION = "0.2"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
+VERSION = "0.3"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
 MAIN_TITLE = f"YT Player v{VERSION}"
 MINI_TITLE = f"YT Player mini v{VERSION}"
 ICON_FILE = APP_DIR / "ytplayer.ico"
@@ -310,7 +310,13 @@ class Api:
             "has_secret": CLIENT_SECRET_FILE.exists(),
             "shuffle": bool(self._settings.get("shuffle")),
             "repeat": self._repeat(),
+            "view": "app" if self._settings.get("view") == "app" else "youtube",
         }
+
+    def set_view(self, view):
+        """プレイヤー画面の見た目：'app'（自前の画面に動画を埋め込む）か 'youtube'（YouTube のページのまま）。"""
+        self._settings["view"] = "app" if view == "app" else "youtube"
+        save_settings(self._settings)
 
     def _repeat(self):
         r = self._settings.get("repeat")
@@ -461,7 +467,14 @@ class Api:
 
     def play_playlist(self, playlist_id):
         if self._window:
-            self._window.load_url(self.select_playlist(playlist_id))
+            url = self.select_playlist(playlist_id)
+            # ページ内のバーがあれば、ページを読み直さずに移る（BAR_JS の openWatch）
+            try:
+                if self._window.evaluate_js(f"!!(window.__ytp && window.__ytp.open && (window.__ytp.open({json.dumps(url)}), true))"):
+                    return
+            except Exception:
+                pass
+            self._window.load_url(url)
 
     def show_player(self):
         if self._show_player:
@@ -486,8 +499,9 @@ BAR_JS = r"""
     boxShadow: '0 2px 8px rgba(0,0,0,.5)', border: '1px solid #555',
     opacity: '.8', transition: 'opacity .2s'
   });
+  const barCss = bar.style.cssText;
   bar.addEventListener('mouseenter', () => bar.style.opacity = '1');
-  bar.addEventListener('mouseleave', () => bar.style.opacity = '.8');
+  bar.addEventListener('mouseleave', () => { if (!viewOn) bar.style.opacity = '.8'; });
   const ctrl = {background: '#272727', color: '#fff', border: '1px solid #444',
                 borderRadius: '4px', padding: '3px 6px', font: 'inherit'};
   const sel = el('select', {title: '再生リスト'}, Object.assign({maxWidth: '280px'}, ctrl));
@@ -500,9 +514,10 @@ BAR_JS = r"""
   const topLabel = el('label', {title: '常に最前面'}, {display: 'flex', gap: '3px', alignItems: 'center', cursor: 'pointer'});
   const topBox = el('input', {type: 'checkbox'});
   topLabel.append(topBox, document.createTextNode('最前面'));
+  const viewBtn = el('button', {}, Object.assign({cursor: 'pointer'}, ctrl));
   const msg = el('span', {}, {color: '#f88', maxWidth: '260px', overflow: 'hidden',
                               textOverflow: 'ellipsis', whiteSpace: 'nowrap'});
-  bar.append(sel, btn, shuffleBtn, repeatBtn, topLabel, diagBtn, msg);
+  bar.append(sel, btn, shuffleBtn, repeatBtn, topLabel, diagBtn, viewBtn, msg);
   document.documentElement.appendChild(bar);
   // 診断の結果（バーの上に出す）
   const diagBox = el('div', {id: 'ytp-diag'}, {
@@ -619,7 +634,7 @@ BAR_JS = r"""
     repeatBtn.title = 'リピート: ' + ({off: 'オフ', all: '再生リスト全体', one: '1 曲'})[mode.repeat];
   }
   function setMode(m) { mode = {shuffle: !!m.shuffle, repeat: m.repeat || 'off'}; paintMode(); }
-  window.__ytp = {step: step, items: items, setMode: setMode};
+  window.__ytp = {step: step, items: items, setMode: setMode, open: url => openWatch(url)};
   shuffleBtn.addEventListener('click', () => {
     setMode({shuffle: !mode.shuffle, repeat: mode.repeat});
     window.pywebview.api.set_play_mode(mode.shuffle, mode.repeat);
@@ -645,10 +660,32 @@ BAR_JS = r"""
     }
     if (r.ok) msg.textContent = '';
   });
+  // 再生リストの切り替えは、ページを読み直さず YouTube のページ内の移動（ytd-app に yt-navigate）で行う。
+  // 読み直すと、その間 YouTube のページが見えて、アプリの画面がちらつくため。プレイヤーの要素もそのまま残る。
+  // 動画のページにいないとき・3 秒たっても移れていないときは、今までどおり読み直す。
+  function openWatch(url) {
+    try {
+      const u = new URL(url, location.href);
+      const v = u.searchParams.get('v'), list = u.searchParams.get('list');
+      const app = document.querySelector('ytd-app');
+      if (u.pathname === '/watch' && v && app && location.pathname === '/watch') {
+        const t = parseInt(u.searchParams.get('t') || '0', 10);
+        const we = {videoId: v};
+        if (list) we.playlistId = list;
+        if (t > 0) we.startTimeSeconds = t;
+        app.dispatchEvent(new CustomEvent('yt-navigate', {bubbles: true, composed: true, detail: {endpoint: {
+          commandMetadata: {webCommandMetadata: {url: u.pathname + u.search, webPageType: 'WEB_PAGE_TYPE_WATCH', rootVe: 3832}},
+          watchEndpoint: we}}}));
+        setTimeout(() => { if (currentList() !== list || currentVideo() !== v) location.href = url; }, 3000);
+        return;
+      }
+    } catch (e) {}
+    location.href = url;
+  }
   sel.addEventListener('change', async () => {
     if (!sel.value) return;
     msg.textContent = '';
-    location.href = await window.pywebview.api.select_playlist(sel.value);
+    openWatch(await window.pywebview.api.select_playlist(sel.value));
   });
   btn.addEventListener('click', refresh);
   topBox.addEventListener('change', () => window.pywebview.api.set_on_top(topBox.checked));
@@ -667,10 +704,196 @@ BAR_JS = r"""
     if (id && [...sel.options].some(o => o.value === id)) sel.value = id;
   }, 1000);
 
+  // ---- アプリの画面（v0.3）----
+  // YouTube のページを自前の画面（#ytp-view）で覆い、動画だけを枠（slot）に重ねて見せる。
+  // プレイヤー要素（#movie_player）はページから動かさない（動かすと YouTube 側が壊れやすい）。
+  // position: fixed で枠の位置・大きさにし、resize の知らせを送ると、プレイヤーが動画をその大きさで描き直す（実機で確認）。
+  // YouTube のページに戻すときは、付けた style を外して resize を送る。動画のページ（/watch）以外では覆わない。
+  const view = el('div', {id: 'ytp-view'}, {
+    position: 'fixed', inset: '0', zIndex: '2147483000', background: '#0f0f0f', color: '#fff',
+    display: 'none', flexDirection: 'column', font: '14px "Segoe UI", "Yu Gothic UI", sans-serif', userSelect: 'none'
+  });
+  const vMain = el('div', {}, {flex: '1', display: 'flex', gap: '12px', minHeight: '0', padding: '12px 12px 0'});
+  const slot = el('div', {}, {flex: '1', minWidth: '0', background: '#000', borderRadius: '8px'});
+  const side = el('div', {}, {width: '360px', display: 'flex', flexDirection: 'column', minHeight: '0',
+                              background: '#181818', borderRadius: '8px', overflow: 'hidden'});
+  const sideHead = el('div', {}, {padding: '10px 12px', color: '#aaa', fontSize: '12px', borderBottom: '1px solid #2a2a2a',
+                                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'});
+  const listBox = el('div', {}, {flex: '1', overflowY: 'auto'});
+  side.append(sideHead, listBox);
+  vMain.append(slot, side);
+  const vFoot = el('div', {}, {padding: '10px 16px 12px', display: 'flex', flexDirection: 'column', gap: '6px'});
+  const vTitle = el('div', {}, {fontSize: '18px', fontWeight: '600', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'});
+  const seek = el('input', {type: 'range', min: '0', max: '1000', value: '0', title: '再生位置'},
+                  {width: '100%', margin: '0', accentColor: '#f33', cursor: 'pointer'});
+  const vRow = el('div', {}, {display: 'flex', alignItems: 'center', gap: '8px', minWidth: '0'});
+  const bigBtn = Object.assign({}, ctrl, {cursor: 'pointer', fontSize: '18px', width: '44px', height: '36px', padding: '0'});
+  const vPrev = el('button', {textContent: '⏮︎', title: '前の曲'}, bigBtn);
+  const vPlay = el('button', {textContent: '▶︎', title: '再生 / 一時停止'}, bigBtn);
+  const vNext = el('button', {textContent: '⏭︎', title: '次の曲'}, bigBtn);
+  const vTime = el('span', {}, {color: '#aaa', fontVariantNumeric: 'tabular-nums', minWidth: '110px', marginLeft: '4px'});
+  const barSlot = el('div', {}, {marginLeft: 'auto', display: 'flex', minWidth: '0'});
+  vRow.append(vPrev, vPlay, vNext, vTime, barSlot);
+  vFoot.append(vTitle, seek, vRow);
+  view.append(vMain, vFoot);
+  document.documentElement.appendChild(view);
+
+  function fmt(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = String(sec % 60).padStart(2, '0');
+    return h ? h + ':' + String(m).padStart(2, '0') + ':' + s : m + ':' + s;
+  }
+  let viewOn = false, placed = '', seeking = false, listSig = '', shownCur = '';
+  function paintViewBtn() {
+    viewBtn.textContent = viewOn ? 'YouTube' : 'アプリ';
+    viewBtn.title = viewOn ? 'YouTube のページの表示に戻す' : '動画と曲の一覧だけのアプリの画面にする';
+  }
+  // 覆いの表示・バーの置き場所・動画の位置を今の状態に合わせる（大きさが変わったとき・0.5 秒ごと）
+  function place() {
+    const mp = document.getElementById('movie_player');
+    const show = viewOn && location.pathname.startsWith('/watch') && !!player();
+    view.style.display = show ? 'flex' : 'none';
+    side.style.display = innerWidth < 760 ? 'none' : 'flex';  // 狭いときは曲の一覧を出さない
+    if (show && bar.parentNode !== barSlot) {
+      barSlot.append(bar);
+      Object.assign(bar.style, {position: 'static', opacity: '1', boxShadow: 'none', border: 'none',
+                                background: 'transparent', padding: '0', minWidth: '0', flexWrap: 'wrap', justifyContent: 'flex-end'});
+    } else if (!show && bar.parentNode === barSlot) {
+      document.documentElement.appendChild(bar);
+      bar.style.cssText = barCss;
+    }
+    // 覆っている間の CSS（下の viewCss）を効かせる
+    document.documentElement.classList.toggle('ytp-app-view', show);
+    if (!mp) return;
+    if (show) {
+      const r = slot.getBoundingClientRect();
+      const key = [r.left, r.top, r.width, r.height].map(Math.round).join(',');
+      if (key !== placed || mp.style.position !== 'fixed') {
+        placed = key;
+        Object.assign(mp.style, {position: 'fixed', left: r.left + 'px', top: r.top + 'px',
+                                 width: r.width + 'px', height: r.height + 'px', zIndex: '2147483001'});
+        window.dispatchEvent(new Event('resize'));
+      }
+    } else if (placed) {
+      placed = '';
+      for (const k of ['position', 'left', 'top', 'width', 'height', 'zIndex']) mp.style[k] = '';
+      window.dispatchEvent(new Event('resize'));
+    }
+  }
+  // 覆っている間の CSS。
+  // ・プレイヤーの親（#player-container）には YouTube が view-transition-name を付けている（曲送りのたびに名前を付け直す）。
+  //   これがあるとその中が別の重なりの層になり、プレイヤーをいくら上にしても覆いの下に隠れる（実機で確認）。
+  //   プレイヤーとその親すべて（:has）で外す。要素の style に書くと付け直されるたびに隠れるので CSS で、important 付きで。
+  // ・ページをスクロールさせない（スクロールバーが残る・ホイールでページが動くため）
+  const viewCss = el('style', {id: 'ytp-view-css', textContent:
+    'html.ytp-app-view :has(#movie_player), html.ytp-app-view #movie_player { view-transition-name: none !important; }' +
+    'html.ytp-app-view { overflow: hidden !important; }'});
+  document.documentElement.appendChild(viewCss);
+  // YouTube は曲送りで画面切り替えのアニメーション（document.startViewTransition）を使う。その間は画面全体が
+  // 写真に置き換わって動画と曲の一覧がちらつくので、覆っている間はアニメーションせず、中身の書き換えだけをする。
+  const origTransition = document.startViewTransition;
+  if (typeof origTransition === 'function') {
+    document.startViewTransition = function (arg) {
+      if (!viewOn) return origTransition.apply(document, arguments);
+      const update = typeof arg === 'function' ? arg : arg && arg.update;
+      const done = Promise.resolve().then(() => update && update());
+      const after = done.then(() => undefined);
+      return {updateCallbackDone: after, ready: after, finished: after, skipTransition() {}, types: new Set()};
+    };
+  }
+  // 曲名はページの一覧（ytd-playlist-panel-video-renderer）から取る。プレイヤーの一覧（getPlaylist）は ID だけ
+  function panelTitles() {
+    const titles = {};
+    for (const r of document.querySelectorAll('ytd-playlist-panel-video-renderer')) {
+      const a = r.querySelector('a[href*="/watch"]'), t = r.querySelector('#video-title');
+      if (!a || !t) continue;
+      try { titles[new URL(a.href, location.href).searchParams.get('v')] = t.textContent.trim(); } catch (e) {}
+    }
+    return titles;
+  }
+  // 曲送りの間は、ページの一覧が作り直されて曲名が取れない・プレイヤーの一覧が一瞬空になる。
+  // 一覧を作り直すのは曲の並びが変わったときだけにし、曲名は覚えておいて、新しく分かったものだけ書き換える。
+  const titleCache = {};
+  function paintList(p, cur) {
+    const ids = p.getPlaylist ? [...(p.getPlaylist() || [])] : [];
+    if (!ids.length && listSig) return;
+    const titles = Object.assign(titleCache, panelTitles());
+    const sig = ids.join(',');
+    if (sig === listSig) {
+      for (const item of listBox.children) {
+        const t = titles[item.dataset.v];
+        if (t && item.title !== t) { item.title = t; item.lastChild.textContent = t; }
+      }
+    } else {
+      listSig = sig;
+      shownCur = '';
+      listBox.replaceChildren(...ids.map((v, i) => {
+        const item = el('div', {title: titles[v] || v}, {display: 'flex', gap: '10px', alignItems: 'center',
+                                                          padding: '6px 10px', cursor: 'pointer'});
+        item.dataset.v = v;
+        const img = el('img', {src: 'https://i.ytimg.com/vi/' + v + '/mqdefault.jpg', loading: 'lazy'},
+                       {width: '96px', height: '54px', objectFit: 'cover', borderRadius: '4px', flex: 'none', background: '#222'});
+        const name = el('div', {textContent: titles[v] || v}, {fontSize: '13px', lineHeight: '1.35', overflow: 'hidden',
+                                                               display: '-webkit-box', webkitLineClamp: '2', webkitBoxOrient: 'vertical'});
+        item.append(el('span', {textContent: String(i + 1)}, {color: '#777', fontSize: '12px', width: '22px', textAlign: 'right', flex: 'none'}), img, name);
+        item.addEventListener('mouseenter', () => { if (item.dataset.v !== shownCur) item.style.background = '#262626'; });
+        item.addEventListener('mouseleave', () => { if (item.dataset.v !== shownCur) item.style.background = ''; });
+        item.addEventListener('click', () => go({go: j => p.playVideoAt(j)}, i));
+        return item;
+      }));
+    }
+    if (cur !== shownCur) {
+      shownCur = cur;
+      for (const item of listBox.children) {
+        const on = item.dataset.v === cur;
+        item.style.background = on ? '#3a3a3a' : '';
+        if (on) item.scrollIntoView({block: 'nearest'});
+      }
+    }
+    const opt = sel.selectedOptions[0];
+    sideHead.textContent = (opt && opt.value ? opt.textContent : '再生リスト') + (ids.length ? '  ·  ' + (ids.indexOf(cur) + 1) + ' / ' + ids.length : '');
+  }
+  function paintView() {
+    place();
+    if (view.style.display === 'none') return;
+    const p = player();
+    const d = p.getVideoData() || {};
+    vTitle.textContent = d.title || document.title.replace(/ - YouTube$/, '');
+    const dur = p.getDuration() || 0, t = p.getCurrentTime() || 0;
+    vTime.textContent = dur > 0 ? fmt(t) + ' / ' + fmt(dur) : fmt(t);
+    if (!seeking) seek.value = dur > 0 ? String(Math.round(t / dur * 1000)) : '0';
+    vPlay.textContent = p.getPlayerState() === 1 ? '⏸︎' : '▶︎';
+    paintList(p, d.video_id || currentVideo());
+  }
+  seek.addEventListener('input', () => { seeking = true; });
+  seek.addEventListener('change', () => {
+    const p = player();
+    if (p && p.getDuration() > 0) p.seekTo(Number(seek.value) / 1000 * p.getDuration(), true);
+    seeking = false;
+  });
+  vPrev.addEventListener('click', () => step(-1));
+  vNext.addEventListener('click', () => step(1));
+  vPlay.addEventListener('click', () => {
+    const p = player();
+    if (p) { if (p.getPlayerState() === 1) p.pauseVideo(); else p.playVideo(); setTimeout(paintView, 200); }
+  });
+  viewBtn.addEventListener('click', () => {
+    viewOn = !viewOn;
+    paintViewBtn();
+    paintView();
+    window.pywebview.api.set_view(viewOn ? 'app' : 'youtube');
+  });
+  window.addEventListener('resize', place);
+  setInterval(paintView, 500);
+  paintViewBtn();
+
   async function init() {
     const s = await window.pywebview.api.get_state();
     topBox.checked = s.on_top;
     setMode(s);
+    viewOn = s.view === 'app';
+    paintViewBtn();
+    paintView();
     fill(s.playlists, currentList());
     // 前回の一覧をすぐ出し、裏で取り直して新しく作った・保存した再生リストも反映する
     refresh();
