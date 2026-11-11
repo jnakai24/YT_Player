@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.11
+// @version      0.12
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.11';
+  const VERSION = '0.12';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -44,13 +44,35 @@
 
   // ---- 開いたら前回の続きから流す（「開いたら続きから」がオンのとき。既定はオン） ----
   // 前回の動画を止めた位置から開く URL。開いているサイト（m. / www.）のまま開く。
-  function resumeUrl() {
+  // 「オフライン優先」がオンのときは、保存済みの曲を保存分で流す側（list=PPSV）で開く。
+  // YouTube は、同じ動画でも watch?v=…&list=PPSV（「オフライン保存」の並び）で開くと、通信せずに保存分を再生する。
+  // 元の再生リストの曲順（settings.orders）を知っているときだけ。保存済みの控え（settings.saved）があれば、保存済みの曲から始める。
+  function onMobile() { return location.hostname === 'm.youtube.com'; }
+  function resumeTarget() {
     if (!settings.last_url) return null;
     const u = new URL(settings.last_url);
     u.searchParams.delete('pp');
     u.searchParams.delete('t');
-    if ((settings.last_time || 0) > 5) u.searchParams.set('t', settings.last_time + 's');
-    return u.pathname + u.search;
+    let time = settings.last_time || 0;
+    const x = u.searchParams.get('list'), order = x && (settings.orders || {})[x];
+    if (!onMobile() && settings.offline && x !== 'PPSV' && order && order.length) {
+      const saved = settings.saved || [];
+      let v = u.searchParams.get('v');
+      if (saved.length && !saved.includes(v)) {
+        const i = order.indexOf(v);
+        v = order.slice(i + 1).concat(order.slice(0, i + 1)).find(id => saved.includes(id)) || null;
+        time = 0;
+      }
+      if (v) {
+        u.searchParams.set('v', v);
+        u.searchParams.set('list', 'PPSV');
+        u.searchParams.delete('index');
+        settings.offline_list = x;
+        save();
+      }
+    }
+    if (time > 5) u.searchParams.set('t', time + 's');
+    return {url: u.pathname + u.search, time: time};
   }
   // スクリプトが開いたページ（続きから・再生リストを選んだとき）では、開いたあとに再生を始め、前回の位置まで進める。
   // スマホ版の YouTube は、Firefox の自動再生を許可していても、開いただけでは再生を始めない。
@@ -79,8 +101,9 @@
     } catch (e) { return; }
     if (location.pathname === '/') {
       // トップページで開いたら、前回の動画へ（ページを読み込む前に飛ぶ）
-      markAutoplay(settings.last_time);
-      location.replace(resumeUrl());
+      const r = resumeTarget();
+      markAutoplay(r.time);
+      location.replace(r.url);
     } else if (location.pathname === '/watch') {
       // Firefox が前回のタブを開き直したときなど。同じ動画で位置の指定がなければ、前回の位置まで進める
       const here = new URL(location.href).searchParams, last = new URL(settings.last_url).searchParams;
@@ -164,6 +187,8 @@
   // そのときは押された操作を覚えておき、一覧ができたら送る（最大 10 秒。過ぎたらプレイヤーに頼む）。
   let pendingStep = null;
   function step(delta) {
+    const vt = virtual();
+    if (vt && virtualStep(vt, delta, false) === true) return;
     if (settings.shuffle && currentList()) {
       // シャッフル中：⏭ はまだ流していない曲へ、⏮ は直前に流した曲へ
       if (delta > 0) { if (jumpRandom()) return; }
@@ -216,7 +241,7 @@
   // YouTube のページのボタンには頼らず、曲の終わり（残り約 1 秒）で自分で次の曲へ移す。
   // 曲の一覧は、パソコン版はプレイヤーが持っている（getPlaylist / playVideoAt）。スマホ版はページ側の一覧のリンクを押す。
   // スマホ版の一覧は長い再生リストだと途中までしか読み込まれていないことがある。そのときは読み込まれている範囲で選ぶ。
-  let played = [], history = [], playedList = null, jumpedAt = 0;
+  let played = [], history = [], playedList = null, jumpedAt = 0, restartFor = null;
   function items() {
     const p = player();
     const ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
@@ -225,7 +250,8 @@
     return {source: 'page', ids: links.map(a => new URL(a.href, location.href).searchParams.get('v')),
             go: i => links[i].click()};
   }
-  function go(it, i) { jumpedAt = Date.now(); pendingStep = null; it.go(i); }
+  // 別の曲へ移るときは、開いたときの「前回の位置へ進める」（resumeSeek）を取り消す（前の曲の位置なので）
+  function go(it, i) { jumpedAt = Date.now(); pendingStep = null; resumeSeek = 0; it.go(i); }
   // まだ流していない曲から選ぶ。一巡したらやり直す
   function jumpRandom() {
     const it = items(), cur = currentVideo(), list = currentList();
@@ -241,17 +267,117 @@
     go(it, rest[Math.floor(Math.random() * rest.length)]);
     return true;
   }
+  // ---- オフライン優先 ----
+  // list=PPSV で開いている間、プレイヤーの曲の並び（getPlaylist）は「保存済みの曲」そのもの（新しく保存した順）。
+  // 元の再生リストの順で流すため、曲の終わりごとに「元の順で次の、保存済みの曲」を探して移る。保存していない曲は飛ばす。
+  function virtual() {
+    if (onMobile() || !settings.offline || currentList() !== 'PPSV') return null;
+    const x = settings.offline_list, order = x && (settings.orders || {})[x];
+    if (!order || !order.length) return null;
+    const p = player(), ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
+    if (!ids || !ids.length) return null;
+    const saved = Array.from(ids);
+    return {list: x, order: order, saved: saved, avail: order.filter(v => saved.includes(v)),
+            go: v => {
+              jumpedAt = Date.now();
+              pendingStep = null;
+              resumeSeek = 0;
+              restartFor = v;  // 保存済みの曲は前回の続きから始まることがあるので、始まったら先頭に戻す（checkEnd）
+              p.playVideoAt(saved.indexOf(v));
+            }};
+  }
+  // 移ったら true。最後の曲の終わりで、全体リピートでないときは 'end'。
+  function virtualStep(vt, delta, atEnd) {
+    const cur = currentVideo(), av = vt.avail;
+    if (!av.length) return false;
+    if (settings.shuffle) {
+      const key = 'PPSV:' + vt.list;
+      if (playedList !== key) { playedList = key; played = []; history = []; }
+      if (delta < 0) {
+        while (history.length) {
+          const v = history.pop();
+          if (vt.saved.includes(v)) { vt.go(v); return true; }
+        }
+        return false;
+      }
+      if (cur && !played.includes(cur)) played.push(cur);
+      let rest = av.filter(v => !played.includes(v));
+      if (!rest.length) {
+        played = cur ? [cur] : [];
+        rest = av.filter(v => v !== cur);
+      }
+      if (!rest.length) return false;
+      if (cur) history.push(cur);
+      vt.go(rest[Math.floor(Math.random() * rest.length)]);
+      return true;
+    }
+    const n = vt.order.length, i = vt.order.indexOf(cur);
+    for (let k = 1; k <= n; k++) {
+      let j = i + delta * k;
+      if (j < 0 || j >= n) {
+        if (atEnd && repeatMode() !== 'all') return 'end';
+        j = ((j % n) + n) % n;
+      }
+      if (vt.saved.includes(vt.order[j])) { vt.go(vt.order[j]); return true; }
+    }
+    return false;
+  }
+  // 曲順と保存済みの控え。パソコン版のプレイヤーだけが一覧を持っている。変わったら true
+  function rememberLists(p) {
+    const ids = typeof p.getPlaylist === 'function' ? p.getPlaylist() : null, id = currentList();
+    if (onMobile() || !ids || !ids.length || !id) return false;
+    const list = Array.from(ids).slice(0, 1000);
+    const same = a => Array.isArray(a) && a.length === list.length && a.every((v, i) => v === list[i]);
+    if (id === 'PPSV') {
+      if (same(settings.saved)) return false;
+      settings.saved = list;
+      return true;
+    }
+    const orders = settings.orders = settings.orders || {};
+    if (same(orders[id])) return false;
+    delete orders[id];  // 新しいものを後ろへ。10 件を超えたら古いものから捨てる
+    orders[id] = list;
+    const keys = Object.keys(orders);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 10))) delete orders[k];
+    return true;
+  }
+  // プルダウンに出す再生リスト。保存分で流している間は、元の再生リスト
+  function shownList() {
+    const id = currentList();
+    return id === 'PPSV' && settings.offline && settings.offline_list ? settings.offline_list : id;
+  }
   function repeatMode() { return settings.repeat === 'all' || settings.repeat === 'one' ? settings.repeat : 'off'; }
   function checkEnd() {
     const repeat = repeatMode();
-    if (!settings.shuffle && repeat === 'off') return;
+    const vt = virtual();
+    if (!vt && !settings.shuffle && repeat === 'off') return;
     const p = player();
-    if (!p || !location.pathname.startsWith('/watch') || adShowing() || Date.now() - jumpedAt < 3000) return;
+    if (!p || !location.pathname.startsWith('/watch') || adShowing()) return;
+    const state = p.getPlayerState();
+    if (restartFor) {
+      if (Date.now() - jumpedAt > 8000) restartFor = null;
+      else if (currentVideo() === restartFor && state === 1) {
+        restartFor = null;
+        if (p.getCurrentTime() > 3) p.seekTo(0, true);
+      }
+    }
+    if (Date.now() - jumpedAt < 3000) return;
+    // 保存分で流している間に曲が終わってしまったとき（終わりの直前から始まったときなど）も、次の曲へ
+    if (vt && state === 0) {
+      virtualStep(vt, 1, true);
+      jumpedAt = Date.now();
+      return;
+    }
     const d = p.getDuration(), t = p.getCurrentTime();
-    if (!(d > 0) || p.getPlayerState() !== 1 || d - t > 1.2) return;
+    if (!(d > 0) || state !== 1 || d - t > 1.2) return;
     const data = p.getVideoData ? p.getVideoData() : null;
     if (data && data.isLive) return;  // ライブ配信はいつも「終わりの直前」に見える
     if (repeat === 'one') { jumpedAt = Date.now(); p.seekTo(0, true); return; }
+    if (vt) {
+      // 保存分で流している間は、いつも自分で次の曲を選ぶ（YouTube に任せると保存した順に進んでしまう）
+      if (virtualStep(vt, 1, true) === 'end') { jumpedAt = Date.now(); p.pauseVideo(); }
+      return;
+    }
     if (!currentList()) return;
     if (settings.shuffle) { jumpRandom(); return; }
     // 全曲リピート：最後の曲なら先頭へ。一覧が途中までしか読み込まれていないことがあるので、本数と比べる
@@ -366,6 +492,11 @@
     if (li.error) out.push(['再生リストの一覧', false, li.error + '（clientVersion ' + WEB_CLIENT_VERSION + '）']);
     else if (li.warn) out.push(['再生リストの一覧', false, li.count + ' 件まで。続きを読めません: ' + li.warn]);
     else out.push(['再生リストの一覧', true, li.count + ' 件（続きを ' + li.pages + ' 回読み込み）']);
+    if (!isMobile) {
+      const orders = settings.orders || {};
+      out.push(['オフライン優先', null, (settings.offline ? 'オン' : 'オフ') + ' · 保存済みの控え ' + (settings.saved || []).length +
+                ' 曲 · 曲順を覚えた再生リスト ' + Object.keys(orders).length + ' 件']);
+    }
     const p = player(), watch = location.pathname.startsWith('/watch');
     if (!watch) {
       out.push(['プレイヤー', null, '動画を開いていないので確かめられません']);
@@ -398,25 +529,29 @@
     return e;
   }
   const isMobile = location.hostname === 'm.youtube.com';
+  // スマホで「デスクトップ サイト」にして www を開いているとき（オフライン保存を使うとき）も、スマホ用の大きさにする。
+  // そのときページは幅 980px ほどで描かれて縮小表示されるので、バーをその分だけ拡大する（applyZoom）。
+  const touch = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  const phone = isMobile || touch;
   const ctrl = {background: '#272727', color: '#fff', border: '1px solid #444', borderRadius: '6px',
-                font: 'inherit', padding: isMobile ? '6px 8px' : '3px 6px', minWidth: isMobile ? '40px' : '0',
+                font: 'inherit', padding: phone ? '6px 8px' : '3px 6px', minWidth: phone ? '40px' : '0',
                 cursor: 'pointer'};
   // スマホでは押しやすいよう大きくする。⏮ ⏯ ⏭ はさらに大きく
-  const tool = isMobile ? Object.assign({}, ctrl, {padding: '10px 0', minWidth: '52px', fontSize: '20px', lineHeight: '1'}) : ctrl;
-  const big = isMobile ? Object.assign({}, ctrl, {padding: '12px 0', minWidth: '64px', fontSize: '26px', lineHeight: '1'}) : ctrl;
+  const tool = phone ? Object.assign({}, ctrl, {padding: '10px 0', minWidth: '52px', fontSize: '20px', lineHeight: '1'}) : ctrl;
+  const big = phone ? Object.assign({}, ctrl, {padding: '12px 0', minWidth: '64px', fontSize: '26px', lineHeight: '1'}) : ctrl;
   const bar = el('div', {id: 'ytp-bar'}, {
     position: 'fixed', zIndex: '2147483647', boxSizing: 'border-box',
     // スマホ版は画面下に YouTube のメニューがあるので、その上に置く
-    left: isMobile ? '6px' : 'auto', right: isMobile ? '6px' : '12px', bottom: isMobile ? '56px' : '12px',
+    left: phone ? '6px' : 'auto', right: phone ? '6px' : '12px', bottom: isMobile ? '56px' : (phone ? '6px' : '12px'),
     display: 'flex', flexDirection: 'column', gap: '6px',
     background: 'rgba(15,15,15,.92)', color: '#fff', padding: '6px 8px', borderRadius: '10px',
-    font: (isMobile ? '14px' : '13px') + ' Roboto, "Segoe UI", sans-serif',
+    font: (phone ? '14px' : '13px') + ' Roboto, "Segoe UI", sans-serif',
     boxShadow: '0 2px 8px rgba(0,0,0,.5)', border: '1px solid #555'
   });
   const row1 = el('div', {}, {display: 'flex', gap: '6px', alignItems: 'center'});
   const row2 = el('div', {}, {display: 'flex', gap: '6px', alignItems: 'center'});
-  const sel = el('select', {title: '再生リスト'}, Object.assign({}, ctrl, {flex: '1', minWidth: '0', maxWidth: isMobile ? 'none' : '280px',
-                                                             padding: isMobile ? '12px 8px' : ctrl.padding}));
+  const sel = el('select', {title: '再生リスト'}, Object.assign({}, ctrl, {flex: '1', minWidth: '0', maxWidth: phone ? 'none' : '280px',
+                                                             padding: phone ? '12px 8px' : ctrl.padding}));
   const refreshBtn = el('button', {textContent: '⟳', title: '再生リストを取得し直す'}, tool);
   const foldBtn = el('button', {textContent: '▾', title: 'たたむ'}, tool);
   const optBtn = el('button', {textContent: '⚙', title: '設定'}, tool);
@@ -491,7 +626,10 @@
   // 設定（⚙ で開く）
   const row3 = el('div', {}, {display: 'flex', gap: '14px', alignItems: 'center', flexWrap: 'wrap'});
   row1.append(sel, refreshBtn, optBtn, foldBtn);
-  row2.append(prevBtn, playBtn, nextBtn, el('span', {}, {flex: '1'}), shuffleBtn, repeatBtn);
+  // 保存分で流している間の「保存済み 40 / 56」
+  const offEl = el('span', {}, {flex: '1', minWidth: '0', overflow: 'hidden', whiteSpace: 'nowrap', textAlign: 'right',
+                                color: '#aaa', fontSize: '12px'});
+  row2.append(prevBtn, playBtn, nextBtn, offEl, shuffleBtn, repeatBtn);
   // 版と、スクリプトが動いている場所（page / content）。うまく動かないときの手がかり
   const about = el('span', {textContent: 'v' + VERSION + ' · ' + MODE}, {color: '#888', fontSize: '12px', marginLeft: 'auto'});
   // 裏に回ったときに何が届いたかの記録（新しいものが下）
@@ -499,7 +637,13 @@
   const diagBtn = el('button', {textContent: '診断', title: 'YouTube のページに頼っている部分が動いているか確かめる'},
                      Object.assign({}, ctrl, {fontSize: '12px'}));
   const diagEl = el('div', {}, {width: '100%', fontSize: '12px', lineHeight: '1.5', display: 'none'});
-  row3.append(resumeLabel, bgLabel, diagBtn, about, diagEl, logEl);
+  // オフライン保存（Premium）はパソコン版のページにしかないので、www を開いているときだけ出す
+  const [offLabel, offBox] = checkbox('オフライン優先', '保存済みの曲は、通信せずに保存分で流す（保存していない曲は飛ばす）');
+  const saveBtn = el('button', {textContent: 'このリストを保存', title: '再生中の再生リストの曲を、YouTube のオフライン保存にまとめて入れる'},
+                     Object.assign({}, ctrl, {fontSize: '12px'}));
+  row3.append(resumeLabel, bgLabel);
+  if (!isMobile) row3.append(offLabel, saveBtn);
+  row3.append(diagBtn, about, diagEl, logEl);
   bar.append(row1, rowTitle, row2, info, row3);
   // たたんだときに出す小さなボタン
   const openBtn = el('button', {id: 'ytp-open', textContent: '♪', title: 'YT Player のバーを開く'},
@@ -523,6 +667,11 @@
     sel.value = selected || '';
     if (sel.value !== (selected || '')) sel.value = '';
   }
+  function applyZoom() {
+    if (!touch || isMobile) return;
+    const z = Math.min(3, Math.max(1, window.innerWidth / (screen.width || window.innerWidth)));
+    bar.style.zoom = openBtn.style.zoom = String(Math.round(z * 100) / 100);
+  }
   function applyFold() {
     bar.style.display = settings.collapsed ? 'none' : 'flex';
     openBtn.style.display = settings.collapsed ? 'block' : 'none';
@@ -532,7 +681,7 @@
     try {
       settings.playlists = await fetchPlaylists();
       save();
-      fill(settings.playlists, currentList() || sel.value);
+      fill(settings.playlists, shownList() || sel.value);
       if (listInfo && listInfo.warn) showMessage('⚠ 一覧の続きを読めませんでした（' + listInfo.count + ' 件まで）', true);
       else showMessage('');
     } catch (e) {
@@ -543,25 +692,26 @@
     const id = sel.value;
     if (!id) return;
     settings.last_playlist = id;
-    // 前にこの再生リストを聴いていたら、その続きから
+    // 前にこの再生リストを聴いていたら、その続きから。初めてなら先頭の動画から
+    // （watch?list=ID だけ（v= なし）だと再生されないので、必ず動画を指定する）
     const pos = (settings.positions || {})[id];
-    if (pos && pos.url) {
-      settings.last_url = pos.url;
-      settings.last_time = pos.time || 0;
-      settings.last_title = pos.title || '';
+    const p = (settings.playlists || []).find(x => x.id === id);
+    const url = pos && pos.url ? pos.url : (p && p.vid ? location.origin + '/watch?v=' + p.vid + '&list=' + id : null);
+    if (!url) {
+      delete settings.last_url;
+      delete settings.last_time;
+      delete settings.last_title;
       save();
-      markAutoplay(settings.last_time);
-      location.href = resumeUrl();
+      location.href = '/playlist?list=' + id;
       return;
     }
-    delete settings.last_url;
-    delete settings.last_time;
-    delete settings.last_title;
+    settings.last_url = url;
+    settings.last_time = pos ? pos.time || 0 : 0;
+    settings.last_title = pos ? pos.title || '' : '';
     save();
-    // watch?list=ID だけ（v= なし）だと再生されないので、先頭の動画から開く
-    const p = (settings.playlists || []).find(x => x.id === id);
-    if (p && p.vid) markAutoplay(0);
-    location.href = p && p.vid ? '/watch?v=' + p.vid + '&list=' + id : '/playlist?list=' + id;
+    const r = resumeTarget();
+    markAutoplay(r.time);
+    location.href = r.url;
   });
   refreshBtn.addEventListener('click', refresh);
   foldBtn.addEventListener('click', () => { settings.collapsed = true; save(); applyFold(); });
@@ -571,8 +721,8 @@
   playBtn.addEventListener('click', () => {
     const p = player();
     if (!location.pathname.startsWith('/watch') || !p) {
-      const u = resumeUrl();
-      if (u) { markAutoplay(settings.last_time); location.href = u; }
+      const r = resumeTarget();
+      if (r) { markAutoplay(r.time); location.href = r.url; }
       return;
     }
     if (p.getPlayerState() === 1) p.pauseVideo(); else p.playVideo();
@@ -600,6 +750,71 @@
     }
   });
   bgBox.addEventListener('change', () => { settings.bg = bgBox.checked; save(); });
+  // オフライン優先の切り替え。再生リストを流している最中なら、その曲のまま保存分の側 / 通信する側へ開き直す
+  offBox.addEventListener('change', () => {
+    const p = player(), vt = virtual(), id = currentList(), v = currentVideo();
+    settings.offline = offBox.checked;
+    save();
+    if (!p || !v || !location.pathname.startsWith('/watch')) return;
+    const list = settings.offline ? id : (vt ? vt.list : null);
+    if (!list || list === 'PPSV' || (settings.offline && !(settings.orders || {})[id])) {
+      if (settings.offline && id && id !== 'PPSV') showMessage('曲順を覚えたら（数秒後）、もう一度オンにしてください');
+      return;
+    }
+    settings.last_url = location.origin + '/watch?v=' + v + '&list=' + list;
+    settings.last_time = Math.floor(p.getCurrentTime());
+    save();
+    const r = resumeTarget();
+    markAutoplay(r.time);
+    location.href = r.url;
+  });
+  // 再生リストの一覧（ytd-playlist-panel-video-renderer）の各曲のメニューにある「オフライン」を順に押す。
+  // 曲を開かずに保存できる。メニューには「再生リストから削除」なども並ぶので、オフラインの項目
+  // （ytd-menu-service-item-download-renderer）だけを種類で見分け、動画 ID も確かめてから押す。
+  // 保存済みの曲は項目名が「オフラインから削除」になっているので押さない。
+  let saving = false;
+  async function saveAll() {
+    if (saving) { saving = false; return; }
+    const rows = [...document.querySelectorAll('ytd-playlist-panel-video-renderer')];
+    const id = currentList();
+    if (!rows.length || !id || id === 'PPSV') {
+      showMessage('再生リストを（通信して）再生しているときに使えます', true);
+      return;
+    }
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const shown = () => [...document.querySelectorAll('ytd-popup-container ytd-menu-service-item-download-renderer')]
+      .find(e => e.offsetParent !== null);
+    const closeMenu = () => document.body.click();
+    saving = true;
+    let added = 0, already = 0, failed = 0;
+    for (let i = 0; i < rows.length && saving; i++) {
+      showMessage('保存中 ' + (i + 1) + ' / ' + rows.length + '（もう一度押すと中止）');
+      const row = rows[i], link = row.querySelector('a[href*="/watch"]');
+      const vid = link ? new URL(link.href, location.href).searchParams.get('v') : null;
+      for (let k = 0; k < 10 && shown(); k++) { closeMenu(); await wait(200); }  // 前のメニューが閉じるのを待つ
+      let btn = row.querySelector('ytd-menu-renderer button');
+      if (!btn) { row.scrollIntoView({block: 'nearest'}); await wait(500); btn = row.querySelector('ytd-menu-renderer button'); }
+      if (!btn || !vid) { failed++; continue; }
+      btn.click();
+      let item = null;
+      for (let k = 0; k < 15 && !item; k++) { await wait(200); item = shown(); }
+      let other = false;  // 別の曲のメニューが出ていないか
+      try {
+        const m = item && JSON.stringify(pageObj(item).data || {}).match(/"videoId":"([\w-]{11})"/);
+        if (m && m[1] !== vid) other = true;
+      } catch (e) {}
+      if (!item || other) { failed++; closeMenu(); await wait(300); continue; }
+      // 見えている文字で判断する（textContent には、隠れているもう一方の項目名も入っている）
+      if (/削除|Remove/i.test(item.innerText)) { already++; closeMenu(); }
+      else { (item.querySelector('tp-yt-paper-item') || item).click(); added++; }
+      await wait(700);
+    }
+    const stopped = !saving;
+    saving = false;
+    showMessage((stopped ? '中止しました。' : '') + added + ' 曲の保存を始めました（保存済み ' + already + '、失敗 ' + failed +
+                '）。終わるまでこのページを開いたままにしてください', failed > 0);
+  }
+  saveBtn.addEventListener('click', saveAll);
   resumeBox.addEventListener('change', () => { settings.autoresume = resumeBox.checked; save(); });
   optBtn.addEventListener('click', () => { settings.showopts = !settings.showopts; save(); applyOpts(); });
   function applyOpts() { row3.style.display = settings.showopts ? 'flex' : 'none'; showLog(); }
@@ -653,7 +868,7 @@
   }
 
   // 1 秒ごと：ボタンの表示、再生リストの選択、バーが消されていないか
-  let lastSave = 0;
+  let lastSave = 0, ensured = false;
   function tick() {
     if (!bar.isConnected) document.documentElement.append(bar, openBtn);
     tryStep();
@@ -663,8 +878,17 @@
     playBtn.textContent = watching && p.getPlayerState() === 1 ? '⏸︎' : '▶︎';
     prevBtn.disabled = nextBtn.disabled = !watching;
     prevBtn.style.opacity = nextBtn.style.opacity = watching ? '1' : '.4';
-    const id = currentList();
-    if (id && sel.value !== id && [...sel.options].some(o => o.value === id)) sel.value = id;
+    const id = currentList(), shownId = shownList();
+    if (shownId && sel.value !== shownId && [...sel.options].some(o => o.value === shownId)) sel.value = shownId;
+    // 保存分で流している間：保存済みの数を出す。開いた曲が保存済みでなければ、保存済みの曲へ移る（開いたときに 1 回だけ）
+    const vt = watching ? virtual() : null;
+    const offText = vt ? '保存済み ' + vt.avail.length + ' / ' + vt.order.length : '';
+    if (offEl.textContent !== offText) offEl.textContent = offText;
+    if (vt && !ensured && !adShowing()) {
+      ensured = true;
+      if (!vt.avail.length) showMessage('この再生リストには保存済みの曲がありません', true);
+      else if (!vt.avail.includes(currentVideo())) virtualStep(vt, 1, false);
+    }
     let title = '', time = '';
     if (watching) {
       // getVideoData() は曲送りの直後など、まだ空のことがある。そのときはページのタイトル（「… - YouTube」）を使う
@@ -685,12 +909,15 @@
     // 再生中のときだけ記録する。開いた直後（前回の位置へ進む前・自動再生が止められて始まっていないとき）に 0 秒で上書きしないため
     if (watching && id && !resumeSeek && !adShowing() && p.getPlayerState() === 1 && Date.now() - lastSave > 5000) {
       lastSave = Date.now();
-      settings.last_url = location.href;
+      // 保存分で流している間（list=PPSV）は、元の再生リストの曲として覚える
+      const key = vt ? vt.list : id;
+      settings.last_url = vt ? location.origin + '/watch?v=' + currentVideo() + '&list=' + vt.list : location.href;
       settings.last_time = Math.floor(p.getCurrentTime());
       if (title && title !== 'YouTube') settings.last_title = title;
+      rememberLists(p);
       // 再生リストごとにも覚える（別の再生リストから戻ってきたときに続きから流す）。古いものから捨てる
       const positions = settings.positions = settings.positions || {};
-      positions[id] = {url: settings.last_url, time: settings.last_time, title: settings.last_title || '', at: Date.now()};
+      positions[key] = {url: settings.last_url, time: settings.last_time, title: settings.last_title || '', at: Date.now()};
       const keys = Object.keys(positions);
       if (keys.length > 100) {
         keys.sort((a, b) => (positions[a].at || 0) - (positions[b].at || 0));
@@ -704,8 +931,11 @@
   function start() {
     bgBox.checked = !!settings.bg;
     resumeBox.checked = settings.autoresume !== false;
+    offBox.checked = !!settings.offline;
     paintMode();
-    fill(settings.playlists, currentList() || settings.last_playlist);
+    applyZoom();
+    window.addEventListener('resize', applyZoom);
+    fill(settings.playlists, shownList() || settings.last_playlist);
     document.documentElement.append(bar, openBtn);
     applyFold();
     applyOpts();

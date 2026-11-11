@@ -29,8 +29,8 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - `ytplayer.py` の `VERSION`（現在 0.2）がウィンドウタイトルに出る（`YT Player v0.2` / `YT Player mini v0.2`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.11）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.11 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.12）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.12 · page` と出る。
 
 ## YouTube のページに頼っている部分（壊れやすい）
 
@@ -94,7 +94,30 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - ⚙ の下の「記録」は、Firefox から届いた知らせ（見える / 見えない、フォーカス、pagehide、描画の停止 / 再開）と再生状態を localStorage `ytp-log` に 12 件残す。実機での調査はこれのスクリーンショットをもらう。
 - Violentmonkey がスクリプトをコンテンツスクリプトとして動かすことがある。そのときはページ側のメソッドが見えないので `wrappedJSObject` / `exportFunction` を通す（`pageObj()` / `pageFn()`）。実機は `page` だった。
 - アニメーションの終了の知らせ（`onfinish`）は画面が描かれていないと届かない。タイトルを流す処理の終わりは `setTimeout` で受ける。
-- 保存先：localStorage `ytp-settings`（一覧・前回の URL と位置・スイッチ）、`ytp-log`。sessionStorage `ytp-resumed`（タブで 1 回だけ続きから）、`ytp-play`。
+- 保存先：localStorage `ytp-settings`（一覧・前回の URL と位置・スイッチ・`orders`・`saved`）、`ytp-log`。sessionStorage `ytp-resumed`（タブで 1 回だけ続きから）、`ytp-play`。
+
+### オフライン保存（Premium。Firefox 版 0.12〜。目的は通信量の節約）
+
+YouTube のオフライン保存は**パソコン版のページ（www）にしかない**（m.youtube.com にはない）。スマホでは Firefox の「デスクトップ サイト」で www を開いて使う。
+Windows 版の YT Player（WebView2）でも保存と保存分の再生ができることを確認済み（本体には未実装）。Data API にオフライン関連の操作はない。
+
+- **保存のボタン**は動画の下には出ず、「その他の操作」（…）メニューと、再生リストの一覧（`ytd-playlist-panel-video-renderer`）の各曲のメニューの中にある
+  `ytd-menu-service-item-download-renderer`。中の `tp-yt-paper-item` を押すと保存が始まる。保存済みだと項目名が「オフラインから削除」になる（押すと確認なしで消える）。
+  保存済みかどうかは **`innerText`** で見る（`textContent` には隠れているもう一方の項目名も入っていて、いつも「削除」を含む）。
+  同じメニューに「再生リストから削除」も並ぶので、**必ずこの要素の種類で見分ける**。`.data` の `videoId` で曲も確かめる（`saveAll()`）。
+- **`watch?v=ID&list=PPSV`** で開くと、通信せず保存分で再生される（アドレスを直接開いてもよい。詳細統計情報の Network Activity が 0 KB のまま）。
+  `list=再生リストID` で開くと、保存済みの曲でも通信する。`PPSV` は「オフライン保存」の並びの ID。
+- `list=PPSV` のとき `getPlaylist()` は**保存済みの曲の ID（新しく保存した順）**。`playVideoAt(i)` で移れる。この一覧の曲にはメニューがない（ここからは消せない）。
+- **オフライン優先**（`virtual()` / `virtualStep()`）：`list=PPSV` の側で開き、曲の終わりごとに「元の再生リストの順で次の、保存済みの曲」へ `playVideoAt` で移る。
+  元の曲順は、通信して流したときの `getPlaylist()` を `settings.orders[再生リストID]` に覚える（10 件まで）。保存済みの控えは `settings.saved`。
+  どの再生リストとして流しているかは `settings.offline_list`。位置（`positions` / `last_url`）は元の再生リストの URL の形で覚え、開くときに `resumeTarget()` が `PPSV` に書き換える。
+- `list=PPSV` では、YouTube が曲を**前回の続きから**始めることがある。曲を移した直後に 3 秒より先から始まったら `seekTo(0)` する（`restartFor`）。
+  終わりの直前から始まって曲が終わってしまったとき（state 0）も次の曲へ移す。保存していない動画を `list=PPSV` で開くと、通信して再生される（一覧は保存済みのもの）。
+- 確認は Windows の YT Player でできる：調査用ポート付きで起動し、プレイヤー画面で `android/ytplayer.user.js` を CDP の `Runtime.evaluate` で実行する
+  （Trusted Types に掛からない。ページを読み直すたびに入れ直す。本体のバーと id が同じなので、スクリプトのバーは後ろのほう）。
+  本体のシャッフルは先にオフにする。試したあとは保存した曲を消し、スクリプトを入れずに読み直してから localStorage の `ytp-*` を消す。
+- 機内モードではページ自体が開けないので、**圏外から聴き始めることはできない**（ユーザーの実機で確認）。
+- 「デスクトップ サイト」のときは UA がパソコンのものになるので、スマホかどうかは `(pointer: coarse)` で見分け、バーを `zoom` で拡大する（`applyZoom()`）。
 
 ### Firefox 版の動作確認
 
