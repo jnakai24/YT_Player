@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.29
+// @version      0.30
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.29';
+  const VERSION = '0.30';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -357,7 +357,7 @@
     const x = settings.offline_list, order = x && (settings.orders || {})[x];
     if (!order || !order.length) return null;
     const p = player(), ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
-    if (!ids || !ids.length) return null;
+    if (!ids || !ids.length || !listReady(p)) return null;  // ページ内の移動の直後で、まだ前の一覧のとき
     const saved = Array.from(ids);
     return {list: x, order: order, saved: saved, avail: order.filter(v => saved.includes(v)),
             go: v => {
@@ -397,19 +397,93 @@
     }
     return order[j];
   }
-  // 保存分の側（list=PPSV）と通信する側（list=再生リスト）は別のページなので、行き来するときは開き直す
+  // 保存分の側（list=PPSV）と通信する側（list=再生リスト）は別の並びなので、行き来するときは移り直す（navigate）
   function openSide(list, v, savedSide) {
     settings.offline_list = list;
     settings.last_url = location.origin + '/watch?v=' + v + '&list=' + list;
     settings.last_time = 0;
     save();
-    log('→ ' + v + (savedSide ? '（保存済みなので、保存分の側へ開き直す）' : '（保存していない曲なので、通信する側へ開き直す）'));
+    log('→ ' + v + (savedSide ? '（保存済みなので、保存分の側へ）' : '（保存していない曲なので、通信する側へ）'));
     jumpedAt = Date.now();
     pendingStep = null;
     resumeSeek = 0;
-    markAutoplay(0);
-    location.href = '/watch?v=' + v + '&list=' + (savedSide ? 'PPSV' : list);
+    navigate('/watch?v=' + v + '&list=' + (savedSide ? 'PPSV' : list), 0);
   }
+  // プレイヤーが持っている曲の一覧が、URL の再生リストのものか。ページ内の移動の直後は、少しの間古い一覧のままのことがある。
+  // そのまま「保存済みの一覧を覚える」などをすると、控えを別の再生リストで上書きしてしまうので、一致するまで待つ。
+  // 「移る前の再生リストの一覧がまだ残っている」ときだけ待つ（移る前の ID を staleList に覚える）。保存分の側で getPlaylistId() が
+  // 何を返すかは分からない（PC には保存済みの曲がなく確かめられない）ので、「URL の再生リストと同じか」では見ない。
+  // ページを開き直したときは staleList がないので、今までどおり待たない。
+  // 保存分の側では getPlaylistId() が null なので（PC で確認）、ID だけでなく一覧の中身（曲の並び）も比べる。
+  let staleList = null;
+  function playerListSig(p) {
+    const id = p && typeof p.getPlaylistId === 'function' ? p.getPlaylistId() : null;
+    const ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
+    return String(id) + '|' + (ids ? Array.from(ids).join(',') : '');
+  }
+  function listReady(p) {
+    if (!staleList) return true;
+    if (playerListSig(p) === staleList.sig && Date.now() - staleList.at < 15000) return false;
+    staleList = null;
+    return true;
+  }
+  // ---- ページ内の移動（0.30）----
+  // 再生リストの切り替え・保存分 ↔ 通信の切り替え・オフライン優先の切り替えは、ページを開き直さず、YouTube のページ内の移動
+  // （ytd-app に yt-navigate）で行う。開き直すと全画面が外れ（全画面はタップしたときにしか頼めない）、ちらつくため（0.29 の実機）。
+  // Windows 版 0.3 と同じやり方。4 秒たっても移り終わらなければ、今までどおり開き直す。
+  // 開き直したときに一度だけしていた準備（再生を始める・前回の位置へ進める・保存分の側の確かめ）は、移り終わったときにやり直す（checkNav）。
+  let pendingNav = null;
+  function navigate(url, seconds) {
+    const u = new URL(url, location.href);
+    const v = u.searchParams.get('v'), list = u.searchParams.get('list');
+    const t = Math.max(0, Math.floor(seconds || 0));
+    u.searchParams.delete('t');
+    if (t > 5) u.searchParams.set('t', t + 's');
+    const app = document.querySelector('ytd-app');
+    if (onMobile() || IN_CONTENT || !app || !location.pathname.startsWith('/watch') || u.pathname !== '/watch' || !v) {
+      markAutoplay(t);
+      location.href = u.pathname + u.search;
+      return;
+    }
+    const we = {videoId: v};
+    if (list) we.playlistId = list;
+    if (t > 5) we.startTimeSeconds = t;
+    const p = player();
+    staleList = list !== currentList() && p ? {sig: playerListSig(p), at: Date.now()} : null;
+    pendingNav = {v: v, list: list, t: t, url: u.pathname + u.search, at: Date.now()};
+    log('ページ内で移る v=' + v + ' list=' + (list === 'PPSV' ? list : (list || '-').slice(0, 6) + '…') + (t > 5 ? ' ' + t + ' 秒から' : ''));
+    app.dispatchEvent(new CustomEvent('yt-navigate', {bubbles: true, composed: true, detail: {endpoint: {
+      commandMetadata: {webCommandMetadata: {url: u.pathname + u.search, webPageType: 'WEB_PAGE_TYPE_WATCH', rootVe: 3832}},
+      watchEndpoint: we}}}));
+  }
+  function checkNav() {
+    if (!pendingNav) return;
+    const n = pendingNav, p = player();
+    const moved = currentVideo() === n.v && currentList() === n.list;
+    if (moved && !n.movedAt) n.movedAt = Date.now();
+    // URL が変わったら、プレイヤーの一覧がそろうまで待つ（通信が遅いときのため最大 15 秒。そろわなくても先へ進み、
+    // 一覧を覚える処理などは listReady で待たせる）
+    if (moved && p && (listReady(p) || Date.now() - n.movedAt > 15000)) {
+      pendingNav = null;
+      ensured = false;
+      whyLogged = false;
+      startedAt = Date.now();
+      wantPlay = true;
+      resumeSeek = n.t > 5 ? n.t : 0;
+      // 保存分の側は、YouTube が曲を前回やめた位置から始めることがある。先頭から流したいときは頭出しの見張りを付ける（checkEnd）
+      if (n.list === 'PPSV' && !(n.t > 5)) { restartFor = n.v; jumpedAt = Date.now(); }
+      log('ページ内で移った（' + (Date.now() - n.at) + 'ms）');
+      startPlayback();
+      return;
+    }
+    if (!moved && Date.now() - n.at > 4000) {  // 4 秒たっても URL が変わらない＝ページ内で移れなかった
+      pendingNav = null;
+      log('ページ内で移れない（今 v=' + currentVideo() + ' list=' + currentList() + ' 一覧=' + (p && p.getPlaylistId ? p.getPlaylistId() : '-') + '）→ 開き直す');
+      markAutoplay(n.t);
+      location.href = n.url;
+    }
+  }
+  setInterval(safe(checkNav, 'checkNav'), 200);
   // ---- 移った曲が流れ始めるかの見張り（0.26）----
   // 実機の記録（0.25）：保存分の側で、ページが見えていない間に曲の終わりで playVideoAt したら、
   // 前の曲の最後（4:02）のまま「読み込み中」（video に src なし）で止まり、画面を点けても戻らなかった。
@@ -517,7 +591,7 @@
   // 曲順と保存済みの控え。パソコン版のプレイヤーだけが一覧を持っている。変わったら true
   function rememberLists(p) {
     const ids = typeof p.getPlaylist === 'function' ? p.getPlaylist() : null, id = currentList();
-    if (onMobile() || !ids || !ids.length || !id) return false;
+    if (onMobile() || !ids || !ids.length || !id || pendingNav || !listReady(p)) return false;  // 移っている途中は覚えない
     const list = Array.from(ids).slice(0, 1000);
     const same = a => Array.isArray(a) && a.length === list.length && a.every((v, i) => v === list[i]);
     if (id === 'PPSV') {
@@ -540,6 +614,7 @@
   }
   function repeatMode() { return settings.repeat === 'all' || settings.repeat === 'one' ? settings.repeat : 'off'; }
   function checkEnd() {
+    if (pendingNav) return;  // ページ内で移っている途中（前の曲の終わりでまた移らない）
     const repeat = repeatMode();
     const vt = virtual();
     const sc = vt ? null : streamCtx();
@@ -1056,8 +1131,7 @@
     settings.last_title = pos ? pos.title || '' : '';
     save();
     const r = resumeTarget();
-    markAutoplay(r.time);
-    location.href = r.url;
+    navigate(r.url, r.time);
   });
   refreshBtn.addEventListener('click', refresh);
   foldBtn.addEventListener('click', () => { settings.collapsed = true; save(); applyFold(); });
@@ -1125,8 +1199,7 @@
     settings.last_time = Math.floor(p.getCurrentTime());
     save();
     const r = resumeTarget(true);
-    markAutoplay(r.time);
-    location.href = r.url;
+    navigate(r.url, r.time);
   });
   // 再生リストの一覧（ytd-playlist-panel-video-renderer）の各曲のメニューにある「オフライン」を順に押す。
   // 曲を開かずに保存できる。メニューには「再生リストから削除」なども並ぶので、オフラインの項目
@@ -1344,7 +1417,7 @@
     } catch (e) { log('video.play() でエラー: ' + ((e && e.message) || e)); }
   }
   let lastSave = 0, ensured = false, lastSig = '', whyLogged = false, lastRemember = 0;
-  const startedAt = Date.now();
+  let startedAt = Date.now();  // ページ内で移り終わったときにも数え直す（checkNav）
   function tick() { safe(tickBody, 'tick')(); }
   function tickBody() {
     applyZoom();
@@ -1366,7 +1439,7 @@
       : sc ? '通信 ' + sc.order.filter(v => sc.saved.includes(v)).length + '/' + sc.order.length : '';
     offEl.style.color = vt ? OFFLINE_COLOR : '#aaa';
     if (offEl.textContent !== offText) offEl.textContent = offText;
-    if (vt && !ensured && !adShowing()) {
+    if (vt && !ensured && !pendingNav && !adShowing()) {
       ensured = true;
       const cur = currentVideo(), here = vt.saved.includes(cur);
       log('保存分で流す: 保存済み ' + vt.avail.length + ' / ' + vt.order.length + '（保存分の一覧 ' + vt.saved.length + ' 曲）');
@@ -1387,7 +1460,7 @@
     }
     // 保存分の側にいるのに流せる曲がないとき（保存済みが 1 曲もない・この再生リストの曲がない）は、通信する側へ戻す。
     // そのままだと次の曲へ進まないため。保存済みの控えを実際の一覧に合わせるので、次からは保存分の側へ行かない
-    if (watching && !whyLogged && !onMobile() && settings.offline && id === 'PPSV' && settings.offline_list &&
+    if (watching && !whyLogged && !pendingNav && listReady(p) && !onMobile() && settings.offline && id === 'PPSV' && settings.offline_list &&
         Date.now() - startedAt > 8000 && (!vt || !vt.avail.length) &&
         (p.getPlayerState() === 1 || p.getPlayerState() === 2)) {
       // ↑ 再生できている（再生中・停止中）ときだけ判断する。読み込みが終わっていない間はプレイヤーの一覧がまだ空で、
@@ -1399,8 +1472,7 @@
           ' → 通信する側へ戻す');
       if (ids) settings.saved = Array.from(ids);  // 一覧が読めたときだけ、控えを実際の一覧に合わせる
       save();
-      markAutoplay(Math.floor(p.getCurrentTime()));
-      location.href = '/watch?v=' + currentVideo() + '&list=' + settings.offline_list;
+      navigate('/watch?v=' + currentVideo() + '&list=' + settings.offline_list, Math.floor(p.getCurrentTime()));
       return;
     }
     // 動画・再生状態・エラーが変わったら残す
@@ -1593,6 +1665,7 @@
   }
   // 曲の一覧。オフライン優先で流しているときも、元の再生リストの曲順で出す（保存済みの曲は緑）
   function paintViewList(p) {
+    if (listSig && (pendingNav || !listReady(p))) return;  // ページ内で移っている途中は、前の一覧のまま
     learnTitles();
     const vt = virtual(), sc = vt ? null : streamCtx();
     const ids = vt ? vt.order : sc ? sc.order : (p.getPlaylist ? Array.from(p.getPlaylist() || []) : []);
@@ -1660,15 +1733,20 @@
     const req = document.documentElement.requestFullscreen;
     if (!req) { showMessage('この Firefox では全画面にできません', true); return; }
     // Firefox は動画を含むものを全画面にすると、向きを横に固定することがある（0.28 の実機：縦で押しても横の全画面になった）。
-    // 全画面になったら、押したときの向きに固定し直す（全画面をやめると固定も外れる）。
+    // 全画面になったら、押したときの向きに固定し直す。少したったら固定を外し、端末の向きに合わせて回るようにする
+    // （0.29 の実機で、開き直して固定が消えたときの「回すと向きが変わる」動きが使いやすかったため）。
     const vv = window.visualViewport;
     const want = (vv ? vv.width < vv.height : innerWidth < innerHeight) ? 'portrait' : 'landscape';
     document.documentElement.requestFullscreen({navigationUI: 'hide'})
       .then(() => {
         const o = screen.orientation;
         if (!o || typeof o.lock !== 'function') { log('全画面にした（向きは固定できない）'); return; }
-        return o.lock(want).then(() => log('全画面にした（' + (want === 'portrait' ? '縦' : '横') + 'に固定）'),
-                                 e => log('全画面にした（向きを固定できない: ' + e.name + ' ' + e.message + '）'));
+        return o.lock(want).then(() => {
+          log('全画面にした（' + (want === 'portrait' ? '縦' : '横') + 'に固定）');
+          setTimeout(() => {
+            try { if (document.fullscreenElement) { o.unlock(); log('向きの固定を外した'); } } catch (e) {}
+          }, 1500);
+        }, e => log('全画面にした（向きを固定できない: ' + e.name + ' ' + e.message + '）'));
       }, e => { log('全画面にできない: ' + e.name + ' ' + e.message); showMessage('全画面にできませんでした', true); });
   }, 'full'));
   document.addEventListener('fullscreenchange', () => {
