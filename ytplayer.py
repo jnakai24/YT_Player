@@ -24,7 +24,7 @@ TOKEN_FILE = DATA_DIR / "token.json"
 CLIENT_SECRET_FILE = APP_DIR / "client_secret.json"
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
-VERSION = "0.3"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
+VERSION = "0.31"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
 MAIN_TITLE = f"YT Player v{VERSION}"
 MINI_TITLE = f"YT Player mini v{VERSION}"
 ICON_FILE = APP_DIR / "ytplayer.ico"
@@ -607,23 +607,46 @@ BAR_JS = r"""
     }
     if (delta > 0) p.nextVideo(); else p.previousVideo();
   }
+  // 再生リストの最後の曲のあとは先頭へ戻る（YouTube に任せると、一覧にないおすすめの動画へ進むか止まる）。
+  // リピートがオフのときは、先頭の曲が始まったところで一時停止する（pauseTop）。
+  let pauseTop = null;
+  function checkPauseTop() {
+    if (!pauseTop) return;
+    const p = player();
+    if (Date.now() - pauseTop.at > 60000) { pauseTop = null; return; }
+    // 移った直後は曲 ID だけ先頭の曲になり、中身（位置・長さ）は前の曲の終わりのままのことがある（PC で確認）。
+    // そこで止めると、再生を押したとき前の曲の終わりから流れてすぐ 2 曲目へ進むので、頭から流れ始めたのを見て止める。
+    if (!p || adShowing() || (p.getVideoData() || {}).video_id !== pauseTop.v || p.getPlayerState() !== 1 ||
+        p.getCurrentTime() > 3) return;
+    pauseTop = null;
+    p.pauseVideo();
+    p.seekTo(0, true);
+  }
+  setInterval(checkPauseTop, 200);
   function checkEnd() {
-    if (!mode.shuffle && mode.repeat === 'off') return;
+    checkPauseTop();
+    if (!mode.shuffle && mode.repeat === 'off' && !currentList()) return;
     const p = player();
     if (!p || !location.pathname.startsWith('/watch') || adShowing() || Date.now() - jumpedAt < 3000) return;
-    const d = p.getDuration(), t = p.getCurrentTime();
-    if (!(d > 0) || p.getPlayerState() !== 1 || d - t > 1.2) return;
+    const d = p.getDuration(), t = p.getCurrentTime(), st = p.getPlayerState();
+    // 終わってしまっていた（状態 0）ときも。短い曲や終わり近くから開いたときは、終わりの直前を見逃すことがある
+    if (!(d > 0) || (st !== 1 && st !== 0) || d - t > 1.2) return;
     if ((p.getVideoData() || {}).isLive) return;  // ライブ配信はいつも「終わりの直前」に見える
-    if (mode.repeat === 'one') { jumpedAt = Date.now(); p.seekTo(0, true); return; }
+    if (mode.repeat === 'one') { jumpedAt = Date.now(); p.seekTo(0, true); if (st === 0) p.playVideo(); return; }
     if (!currentList()) return;
     if (mode.shuffle) { jumpRandom(); return; }
-    // 全曲リピート：最後の曲なら先頭へ。長い再生リストは一覧が途中までしか読み込まれていないことがあるので、本数と比べる
+    // 最後の曲なら先頭へ（オフのときは先頭で一時停止）。長い再生リストは一覧が途中までしか読み込まれていないことがあるので、本数と比べる
     const it = items(), i = it.ids.indexOf(currentVideo());
     const pl = playlists.find(x => x.id === currentList());
     const total = pl ? Number(String(pl.count).replace(/,/g, '')) : NaN;
-    if (i >= 0 && i === it.ids.length - 1 && !(total > it.ids.length)) go(it, 0);
+    if (i >= 0 && i === it.ids.length - 1 && !(total > it.ids.length)) {
+      if (mode.repeat === 'off') pauseTop = {v: it.ids[0], at: Date.now()};
+      go(it, 0);
+    }
   }
   document.addEventListener('timeupdate', checkEnd, true);
+  // 曲が最後まで行ったら、その場で（YouTube が次の動画へ進む前に）
+  document.addEventListener('ended', e => { if (e.target && e.target.tagName === 'VIDEO') checkEnd(); }, true);
   setInterval(checkEnd, 250);
   function paintMode() {
     const on = {background: '#3d5a80', borderColor: '#7fb2ff'}, off = {background: '#272727', borderColor: '#444'};
@@ -676,7 +699,10 @@ BAR_JS = r"""
         app.dispatchEvent(new CustomEvent('yt-navigate', {bubbles: true, composed: true, detail: {endpoint: {
           commandMetadata: {webCommandMetadata: {url: u.pathname + u.search, webPageType: 'WEB_PAGE_TYPE_WATCH', rootVe: 3832}},
           watchEndpoint: we}}}));
-        setTimeout(() => { if (currentList() !== list || currentVideo() !== v) location.href = url; }, 3000);
+        // 移れなかった（URL が変わらない）ときだけ読み直す。「選んだ曲にいない」で見ると、短い曲がすぐ終わって次の曲へ進んだのを
+        // 失敗と間違えて t= 付きで読み直し、読み直した先ではこのバーが入る前に曲が終わって、YouTube がおすすめの動画へ進む（0.31 で実際に起きた）。
+        const from = location.href;
+        setTimeout(() => { if (location.href === from) location.href = url; }, 3000);
         return;
       }
     } catch (e) {}
@@ -693,7 +719,9 @@ BAR_JS = r"""
   setInterval(() => {
     const p = document.getElementById('movie_player');
     if (!location.pathname.startsWith('/watch') || !p || !p.getCurrentTime || adShowing()) return;
-    window.pywebview.api.report_position(location.href, Math.floor(p.getCurrentTime()));
+    // 曲の終わりの 10 秒以内なら 0 秒として覚える（そこから開くとすぐ終わって、次の曲へ進むのを見張れないことがある）
+    const d = p.getDuration ? p.getDuration() : 0, t = p.getCurrentTime();
+    window.pywebview.api.report_position(location.href, d > 0 && d - t < 10 ? 0 : Math.floor(t));
   }, 5000);
   // YouTube はページ内遷移なので URL の変化を見て選択を合わせる
   let lastUrl = location.href;

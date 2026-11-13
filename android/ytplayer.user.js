@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.30
+// @version      0.31
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.30';
+  const VERSION = '0.31';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -370,9 +370,8 @@
               p.playVideoAt(saved.indexOf(v));
             }};
   }
-  // 移ったら true。最後の曲の終わりで、全体リピートでないときは 'end'。
   // 元の再生リストの順（シャッフルなら、まだ流していない曲）で次の曲を選ぶ。保存済みかどうかは見ない。
-  // 最後の曲の終わりで全体リピートでないときは 'end'。選べないときは null。
+  // 最後の曲の次は先頭（リピートがオフでも）。選べないときは null。
   function pickNext(list, order, delta, atEnd) {
     const cur = currentVideo();
     if (settings.shuffle) {
@@ -392,8 +391,7 @@
     const n = order.length;
     let j = order.indexOf(cur) + delta;
     if (j < 0 || j >= n) {
-      if (atEnd && repeatMode() !== 'all') return 'end';
-      j = ((j % n) + n) % n;
+      j =((j % n) + n) % n;
     }
     return order[j];
   }
@@ -450,7 +448,7 @@
     if (t > 5) we.startTimeSeconds = t;
     const p = player();
     staleList = list !== currentList() && p ? {sig: playerListSig(p), at: Date.now()} : null;
-    pendingNav = {v: v, list: list, t: t, url: u.pathname + u.search, at: Date.now()};
+    pendingNav = {v: v, list: list, t: t, url: u.pathname + u.search, at: Date.now(), from: location.href};
     log('ページ内で移る v=' + v + ' list=' + (list === 'PPSV' ? list : (list || '-').slice(0, 6) + '…') + (t > 5 ? ' ' + t + ' 秒から' : ''));
     app.dispatchEvent(new CustomEvent('yt-navigate', {bubbles: true, composed: true, detail: {endpoint: {
       commandMetadata: {webCommandMetadata: {url: u.pathname + u.search, webPageType: 'WEB_PAGE_TYPE_WATCH', rootVe: 3832}},
@@ -459,7 +457,9 @@
   function checkNav() {
     if (!pendingNav) return;
     const n = pendingNav, p = player();
-    const moved = currentVideo() === n.v && currentList() === n.list;
+    // 一度その曲に着いたら、移れたことにする。短い曲がすぐ終わって次の曲へ進んでいても（同じ再生リストで URL が変わっていれば）移れている。
+    // 「今その曲にいるか」だけで見ると、失敗と間違えて開き直してしまう（Windows 版 0.31 で、23 秒の曲で実際に起きた）。
+    const moved = !!n.movedAt || (currentList() === n.list && (currentVideo() === n.v || location.href !== n.from));
     if (moved && !n.movedAt) n.movedAt = Date.now();
     // URL が変わったら、プレイヤーの一覧がそろうまで待つ（通信が遅いときのため最大 15 秒。そろわなくても先へ進み、
     // 一覧を覚える処理などは listReady で待たせる）
@@ -554,7 +554,7 @@
   }
   setInterval(safe(checkMove, 'checkMove'), 1000);
   // 保存分の側で次の曲へ。保存済みならそのまま移り、保存していない曲なら通信する側へ開き直す。
-  // 移ったら true。最後の曲の終わりで、全体リピートでないときは 'end'。
+  // 移ったら true。
   function virtualStep(vt, delta, atEnd) {
     const v = pickNext(vt.list, vt.order, delta, atEnd);
     if (v === 'end') return 'end';
@@ -613,12 +613,46 @@
     return id === 'PPSV' && settings.offline && settings.offline_list ? settings.offline_list : id;
   }
   function repeatMode() { return settings.repeat === 'all' || settings.repeat === 'one' ? settings.repeat : 'off'; }
+  // 再生リストの最後の曲のあとは先頭へ戻る（YouTube に任せると、一覧にないおすすめの動画へ進むか止まる）。
+  // リピートがオフのときは、先頭の曲が始まったところで一時停止する。ページを開き直すことがあるので sessionStorage にも覚える。
+  let pauseTop = null;
+  try { pauseTop = JSON.parse(sessionStorage.getItem('ytp-pause-top') || 'null'); } catch (e) {}
+  function setPauseTop(v) {
+    pauseTop = v ? {v: v, at: Date.now()} : null;
+    try {
+      if (pauseTop) sessionStorage.setItem('ytp-pause-top', JSON.stringify(pauseTop));
+      else sessionStorage.removeItem('ytp-pause-top');
+    } catch (e) {}
+  }
+  // 順番どおり・リピートがオフで、今の曲が order の最後なら、先頭の曲で止める印を付ける
+  function markIfLast(order) {
+    if (settings.shuffle || repeatMode() !== 'off' || !order.length) return;
+    if (order.indexOf(currentVideo()) === order.length - 1) setPauseTop(order[0]);
+  }
+  function checkPauseTop() {
+    if (!pauseTop) return;
+    if (Date.now() - pauseTop.at > 60000) { setPauseTop(null); return; }
+    const p = player();
+    // 移った直後は曲 ID だけ先頭の曲になり、中身（位置・長さ）は前の曲の終わりのままのことがある（PC で確認）。
+    // そこで止めると、再生を押したとき前の曲の終わりから流れてすぐ 2 曲目へ進むので、頭から流れ始めたのを見て止める
+    // （保存分の側で途中から始まったときは、restartFor が頭出ししてから）。
+    if (!p || adShowing() || !p.getVideoData || (p.getVideoData() || {}).video_id !== pauseTop.v || p.getPlayerState() !== 1 ||
+        p.getCurrentTime() > 3) return;
+    setPauseTop(null);
+    wantPlay = false;  // 開いたページの「再生を始める」が一時停止を取り消さないように
+    resumeSeek = 0;
+    restartFor = null;  // 保存分の側の頭出しの見張りも（止めた曲を再生し直してしまう）
+    p.pauseVideo();
+    p.seekTo(0, true);
+    log('最後の曲が終わったので、先頭の曲で止めた');
+  }
+  setInterval(safe(checkPauseTop, 'checkPauseTop'), 200);
   function checkEnd() {
     if (pendingNav) return;  // ページ内で移っている途中（前の曲の終わりでまた移らない）
     const repeat = repeatMode();
     const vt = virtual();
     const sc = vt ? null : streamCtx();
-    if (!vt && !sc && !settings.shuffle && repeat === 'off') return;
+    if (!vt && !sc && !settings.shuffle && repeat === 'off' && !currentList()) return;
     const p = player();
     if (!p || !location.pathname.startsWith('/watch') || adShowing()) return;
     const state = p.getPlayerState();
@@ -647,6 +681,7 @@
     // 保存分で流している間に曲が終わってしまったとき（終わりの直前から始まったときなど）も、次の曲へ
     if (vt && state === 0) {
       log('曲が終わっていた → 次の保存済みの曲へ');
+      markIfLast(vt.order);
       virtualStep(vt, 1, true);
       jumpedAt = Date.now();
       return;
@@ -657,26 +692,34 @@
     const gap = Date.now() - lastCheck;
     lastCheck = Date.now();
     const lead = 1.2 + (gap > 600 ? Math.min(3.8, gap / 1000) : 0);
-    if (!(d > 0) || state !== 1 || d - t > lead) return;
+    // 終わってしまっていた（状態 0）ときも。短い曲や終わり近くから開いたときは、終わりの直前を見逃すことがある
+    if (!(d > 0) || (state !== 1 && state !== 0) || d - t > lead) return;
     const data = p.getVideoData ? p.getVideoData() : null;
     if (data && data.isLive) return;  // ライブ配信はいつも「終わりの直前」に見える
-    if (repeat === 'one') { jumpedAt = Date.now(); p.seekTo(0, true); return; }
+    if (repeat === 'one') { jumpedAt = Date.now(); p.seekTo(0, true); if (state === 0) p.playVideo(); return; }
     if (vt) {
       // 保存分で流している間は、いつも自分で次の曲を選ぶ（YouTube に任せると保存した順に進んでしまう）
       log('曲の終わり');
-      if (virtualStep(vt, 1, true) === 'end') { jumpedAt = Date.now(); log('最後の曲なので止める'); p.pauseVideo(); }
+      markIfLast(vt.order);
+      if (!virtualStep(vt, 1, true)) setPauseTop(null);
       return;
     }
     if (!currentList()) return;
     // オフライン優先で通信する側にいるとき：次が保存済みの曲なら、保存分の側へ開き直す
-    if (sc && streamStep(sc, 1, true)) return;
+    if (sc) {
+      markIfLast(sc.order);
+      if (streamStep(sc, 1, true)) return;
+      setPauseTop(null);
+    }
     if (settings.shuffle) { jumpRandom(); return; }
-    if (repeat !== 'all') return;
-    // 全曲リピート：最後の曲なら先頭へ。一覧が途中までしか読み込まれていないことがあるので、本数と比べる
+    // 最後の曲なら先頭へ（オフのときは先頭で一時停止）。一覧が途中までしか読み込まれていないことがあるので、本数と比べる
     const it = items(), i = it.ids.indexOf(currentVideo());
     const pl = (settings.playlists || []).find(x => x.id === currentList());
     const total = pl ? Number(String(pl.count).replace(/,/g, '')) : NaN;
-    if (i >= 0 && i === it.ids.length - 1 && !(total > it.ids.length)) go(it, 0);
+    if (i >= 0 && i === it.ids.length - 1 && !(total > it.ids.length)) {
+      if (repeat === 'off') setPauseTop(it.ids[0]);
+      go(it, 0);
+    }
   }
   // スクリプトの中で起きたエラーも記録に残す（同じ内容は 1 回だけ）
   let lastError = '';
@@ -694,7 +737,8 @@
   document.addEventListener('ended', safe(function (e) {
     if (!e.target || e.target.tagName !== 'VIDEO' || adShowing() || moving || Date.now() - jumpedAt < 3000) return;
     const vt = virtual(), p = player();
-    if (!vt || !p) return;
+    if (!p) return;
+    if (!vt) { checkEnd(); return; }  // 通信して流しているときも（最後の曲のあと、YouTube がおすすめの動画へ進む前に先頭へ）
     if (repeatMode() === 'one') {
       jumpedAt = Date.now();
       p.seekTo(0, true);

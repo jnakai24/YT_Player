@@ -26,15 +26,15 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 
 ## バージョン
 
-- `ytplayer.py` の `VERSION`（現在 0.3）がウィンドウタイトルに出る（`YT Player v0.3` / `YT Player mini v0.3`）。
+- `ytplayer.py` の `VERSION`（現在 0.31）がウィンドウタイトルに出る（`YT Player v0.31` / `YT Player mini v0.31`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.30）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.30 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.31）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.31 · page` と出る。
 
-## 今の状況（2026-11-11 時点。変わったら書き直す）
+## 今の状況（2026-11-13 時点。変わったら書き直す）
 
-Windows 版 0.3（push 済み）、Firefox 版 0.30（push 済み。実機は未確認）。Firefox 版のアプリの画面・全画面・× は実機で確認済み（2026-11-11）。細かい仕組みと経緯は、下のそれぞれの節にある。
+Windows 版 0.31・Firefox 版 0.31（最後の曲のあと先頭で止める。PC で確認、未 push）。その前は Windows 版 0.3・Firefox 版 0.30（push 済み）。Firefox 版のアプリの画面・全画面・× は実機で確認済み（2026-11-11）。細かい仕組みと経緯は、下のそれぞれの節にある。
 
 ### 実機で確かめたこと
 
@@ -90,6 +90,15 @@ Windows 版 0.3（push 済み）、Firefox 版 0.30（push 済み。実機は未
   プレイヤーが一覧を持たないとき（スマホ版）はページの一覧（`ytm-` / `ytd-playlist-panel-video-renderer`）のリンクを押す。
   広告の間（`ad-showing`）とライブ配信（`getVideoData().isLive`）では何もしない。モードは Python の settings（`shuffle` / `repeat`）にあり、
   ミニプレイヤーからは `set_play_mode` → `window.__ytp.setMode()` でページに伝える。ミニの ⏮ ⏭ も `window.__ytp.step()` を通る。
+- **再生リストの最後の曲のあと**（0.31。両方の版）：YouTube に任せると一覧にないおすすめの動画へ進むか止まるので、リピートがオフでも先頭へ移る。
+  オフのときは先頭の曲が流れ始めたところで一時停止する（`pauseTop`。ユーザーの希望）。全体リピートはそのまま流す。手で ⏭ したときは止めない。
+  **移った直後は曲 ID だけ先頭の曲で、位置・長さは前の曲の終わりのまま「再生中」に見える**（PC で確認）。そこで止めると ▶ で前の曲の終わりから流れて
+  すぐ 2 曲目へ進むので、位置が 3 秒以内になってから止める。Firefox 版は開き直しに備えて sessionStorage `ytp-pause-top` にも覚え、`wantPlay` と `restartFor` を消してから止める。
+  曲が終わってしまった（状態 0、`ended`）ときも同じように扱う。
+- **短い曲で再生リストの外へ出た**（0.31 の途中で、ユーザーの「ノーゲーム・ノーライフ (5)」）：最後の曲が 23 秒で、覚えた位置が 23 秒だった。
+  ページ内の移動の確かめ（Windows 版 `openWatch()` は 3 秒後、Firefox 版 `checkNav()` は 4 秒後）が「選んだ曲にいない」を失敗とみなし、
+  すでに次の曲へ進んでいたのに `t=` 付きで読み直していた。読み直した先ではバーが入る前に曲が終わり、YouTube がおすすめの動画へ進む。
+  今は「URL が変わらなかった」ときだけ読み直す。位置は、Windows 版も終わりの 10 秒以内なら 0 秒で覚える（Firefox 版は前から）。
 - **自己診断**（バー・ミニの「診断」、Firefox 版は ⚙ の中）：上の頼っている部分が使えるかを確かめる（`Api.diagnose()` / `DIAG_JS`、Firefox 版は `diagnose()`）。
   頼る部分を増やしたら、診断の項目にも足す。
 - **再生リストごとの位置**：settings の `positions[再生リスト ID] = {url, time, at}`（Firefox 版は localStorage `ytp-settings` の同じ名前）。
