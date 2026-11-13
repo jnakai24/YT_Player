@@ -24,7 +24,7 @@ TOKEN_FILE = DATA_DIR / "token.json"
 CLIENT_SECRET_FILE = APP_DIR / "client_secret.json"
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
-VERSION = "0.31"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
+VERSION = "0.32"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
 MAIN_TITLE = f"YT Player v{VERSION}"
 MINI_TITLE = f"YT Player mini v{VERSION}"
 ICON_FILE = APP_DIR / "ytplayer.ico"
@@ -146,7 +146,8 @@ PAGE_PLAYLISTS_JS = r"""
         const badge = (s.match(/"text":"([^"]*?(?:本の動画|エピソード|レッスン|ミックスリスト|videos?|episodes?|lessons?|Mix)[^"]*)"/) || [])[1];
         const vid = (s.match(/"watchEndpoint":\{"videoId":"([\w-]{11})"/) || [])[1];
         const n = badge && badge.match(/^([\d,]+) 本の動画$/);
-        if (l.contentId && title && !seen.has(l.contentId)) {
+        // ミックスリスト（ID が RD で始まる）は、YouTube が自動で作る終わりのない並びなので出さない（ユーザーの希望）
+        if (l.contentId && title && !/^RD/.test(l.contentId) && !seen.has(l.contentId)) {
           seen.add(l.contentId);
           out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null});
         }
@@ -696,12 +697,14 @@ BAR_JS = r"""
         const we = {videoId: v};
         if (list) we.playlistId = list;
         if (t > 0) we.startTimeSeconds = t;
+        // 頼む前の URL。YouTube は yt-navigate を受けるとその場で URL を書き換えるので、頼んだあとに読むと移り先の URL になり、
+        // 下の確かめが毎回「変わっていない」になって読み直してしまう（0.32 で実際に起きた）
+        const from = location.href;
         app.dispatchEvent(new CustomEvent('yt-navigate', {bubbles: true, composed: true, detail: {endpoint: {
           commandMetadata: {webCommandMetadata: {url: u.pathname + u.search, webPageType: 'WEB_PAGE_TYPE_WATCH', rootVe: 3832}},
           watchEndpoint: we}}}));
         // 移れなかった（URL が変わらない）ときだけ読み直す。「選んだ曲にいない」で見ると、短い曲がすぐ終わって次の曲へ進んだのを
         // 失敗と間違えて t= 付きで読み直し、読み直した先ではこのバーが入る前に曲が終わって、YouTube がおすすめの動画へ進む（0.31 で実際に起きた）。
-        const from = location.href;
         setTimeout(() => { if (location.href === from) location.href = url; }, 3000);
         return;
       }

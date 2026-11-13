@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.31
+// @version      0.32
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.31';
+  const VERSION = '0.32';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -761,7 +761,7 @@
   }
 
   // ---- 再生リストの一覧 ----
-  // YouTube の「再生リスト」ページと同じ一覧（保存した再生リスト・後で見る・ミックスリストも）。
+  // YouTube の「再生リスト」ページと同じ一覧（保存した再生リスト・後で見るも。ミックスリストは出さない）。
   // m.youtube.com からはパソコン版のページを読めない（別のサイト扱い）ので、YouTube 自身が使っている
   // 内部 API（/youtubei/v1/browse、FEplaylist_aggregation）にログイン中の Cookie で問い合わせる。
   // 再生リスト（lockupViewModel）を out に集め、続きを読むための合言葉（continuationItemRenderer の token）を返す
@@ -776,7 +776,8 @@
         const badge = (s.match(/"text":"([^"]*?(?:本の動画|エピソード|レッスン|ミックスリスト|videos?|episodes?|lessons?|Mix)[^"]*)"/) || [])[1];
         const vid = (s.match(/"watchEndpoint":\{"videoId":"([\w-]{11})"/) || [])[1];
         const n = badge && badge.match(/^([\d,]+) 本の動画$/);
-        if (l.contentId && title && !seen.has(l.contentId)) {
+        // ミックスリスト（ID が RD で始まる）は、YouTube が自動で作る終わりのない並びなので出さない（ユーザーの希望）
+        if (l.contentId && title && !/^RD/.test(l.contentId) && !seen.has(l.contentId)) {
           seen.add(l.contentId);
           out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null});
         }
