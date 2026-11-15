@@ -15,7 +15,7 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - `playlist_tools/add_playlist.py` — テキストから Data API で再生リストを作る。
 - `android/ytplayer.user.js` — Firefox（Android）用のユーザースクリプト版。youtube.com にバーを足す。使い方は `android/README.md`。
   一覧の取り方（内部 API）以外は本体と同じページの作りに頼っているので、本体側を直したらこちらも合わせる。バージョンは別（`@version` と `VERSION`）。
-- `tools/cdp.py`, `tools/win.ps1` — 動作確認用（下の「動作確認」）。
+- `tools/cdp.py`, `tools/win.ps1` — 動作確認用（下の「動作確認」）。`tools/memlog.py` — プレイヤー画面のメモリを一定の間隔で `data/memlog.csv` に記録する（調査用）。
 - `make_icon.py` → `ytplayer.ico` / `ytplayer.png`。
 
 ## 秘密情報（絶対にコミットしない）
@@ -26,16 +26,16 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 
 ## バージョン
 
-- `ytplayer.py` の `VERSION`（現在 0.32）がウィンドウタイトルに出る（`YT Player v0.32` / `YT Player mini v0.32`）。
+- `ytplayer.py` の `VERSION`（現在 0.33）がウィンドウタイトルに出る（`YT Player v0.33` / `YT Player mini v0.33`）。
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
   **VERSION を上げたあとは、古い版で動いている YT Player を `win.ps1 close` で閉じられない**（新しい題名で探すため）。そのまま起動すると `already_running()` で何も言わずに終わり、古い版が動き続ける。古い版はプロセスの `CloseMainWindow()` で閉じる。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.32）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.32 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.33）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.33 · page` と出る。
 
-## 今の状況（2026-11-13 時点。変わったら書き直す）
+## 今の状況（2026-11-15 時点。変わったら書き直す）
 
-Windows 版 0.32・Firefox 版 0.32（プルダウンからミックスリストを外した・再生リストを切り替えるたびに読み直していたのを直した。push 済み。Firefox 版の一覧の取得は PC で試せていない）。0.31（最後の曲のあと先頭で止める。PC で確認、push 済み。実機は未確認）。その前は Windows 版 0.3・Firefox 版 0.30（push 済み）。Firefox 版のアプリの画面・全画面・× は実機で確認済み（2026-11-11）。細かい仕組みと経緯は、下のそれぞれの節にある。
+Windows 版 0.33・Firefox 版 0.33（一時停止のまま放っておくと Out of Memory で落ちていたのを直した。下の「getPlaylist() のメモリ」。PC で確認。コミット・push はまだ）。0.32（プルダウンからミックスリストを外した・再生リストを切り替えるたびに読み直していたのを直した。push 済み。Firefox 版の一覧の取得は PC で試せていない）。0.31（最後の曲のあと先頭で止める。PC で確認、push 済み。実機は未確認）。その前は Windows 版 0.3・Firefox 版 0.30（push 済み）。Firefox 版のアプリの画面・全画面・× は実機で確認済み（2026-11-11）。細かい仕組みと経緯は、下のそれぞれの節にある。
 
 ### 実機で確かめたこと
 
@@ -89,6 +89,13 @@ Windows 版 0.32・Firefox 版 0.32（プルダウンからミックスリスト
   絞り込みのボタンにも `continuationCommand` があるので、`continuationItemRenderer` の中だけを見る。続きが読めなくても読めたところまでは使う（バーに ⚠ が出る）。
 - **シャッフル・リピート**は YouTube のページのボタンを使わず、自前でやる（`checkEnd()`）。曲の終わりの 1.2 秒前（`timeupdate` と 250ms のタイマー）に、
   `seekTo(0)`（1 曲リピート）か、別の曲へ移る。曲の一覧は `#movie_player` の `getPlaylist()`、移動は `playVideoAt(i)`。
+- **`getPlaylist()` のメモリ**（0.33。両方の版）：**一時停止中は呼ぶたびに YouTube の中にメモリが残り、再生を始めるまで片付かない**。
+  アプリの画面が 0.5 秒ごとに呼んでいて、一時停止のまま 3〜4 時間で JS が上限に届き、ページが「Out of Memory」で落ちた（2026-11-14、出かけている間）。
+  360 回呼ぶと GC のあとでも約 72 MB 残る（ほかの getDuration / getCurrentTime / getPlayerState / getVideoData は増えない）。
+  今は直接呼ばず、曲か URL が変わったときだけ呼び直す（Windows 版 `playlistIds()`、Firefox 版 `playerIds()`。空のときと、Firefox 版のページ内で移っている途中だけは短い間隔で呼び直す）。
+  確かめ方：調査用ポート付きで起動して一時停止し、CDP の `HeapProfiler.collectGarbage` → `Runtime.getHeapUsage` を数分おいて比べる。
+  どこが確保しているかは `HeapProfiler.startSampling` / `getSamplingProfile`（呼び出し元に BAR_JS の関数名が出る）。
+  曲が進むにつれてページの要素数・リスナー数がゆっくり増える（3 時間で 29,000 → 79,000 個）のは別の話で、まだ調べていない。
   プレイヤーが一覧を持たないとき（スマホ版）はページの一覧（`ytm-` / `ytd-playlist-panel-video-renderer`）のリンクを押す。
   広告の間（`ad-showing`）とライブ配信（`getVideoData().isLive`）では何もしない。モードは Python の settings（`shuffle` / `repeat`）にあり、
   ミニプレイヤーからは `set_play_mode` → `window.__ytp.setMode()` でページに伝える。ミニの ⏮ ⏭ も `window.__ytp.step()` を通る。

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.32
+// @version      0.33
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.32';
+  const VERSION = '0.33';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -253,6 +253,24 @@
     const p = pageObj(document.getElementById('movie_player'));
     return p && typeof p.getPlayerState === 'function' ? p : null;
   }
+  // プレイヤーの曲の一覧（getPlaylist）。一時停止中は呼ぶたびに YouTube の中にメモリが残り、再生を始めるまで片付かない
+  // （Windows 版で、0.5 秒ごとに呼んでいて 3 分で約 70 MB、出かけている間に Out of Memory で落ちた。0.33）。
+  // 曲か URL が変わったときだけ呼び直す。曲送りの直後は一瞬空なので、空のときは 1 秒おき（10 秒たったら 30 秒おき）に呼び直す。
+  // ページ内で移っている途中（pendingNav / staleList）は、一覧が新しくなるのを待つので 0.5 秒おきに呼び直す（長くて 15 秒）。
+  let plCache = null;
+  function playerIds(p) {
+    if (!p || typeof p.getPlaylist !== 'function') return [];
+    const d = typeof p.getVideoData === 'function' ? p.getVideoData() : null;
+    const key = ((d && d.video_id) || '') + '|' + location.href, now = Date.now();
+    if (plCache && plCache.key === key) {
+      const age = now - plCache.at;
+      const wait = (pendingNav || staleList) ? 500 : plCache.ids.length ? Infinity : now - plCache.since < 10000 ? 1000 : 30000;
+      if (age < wait) return plCache.ids;
+    }
+    const ids = Array.from(p.getPlaylist() || []);
+    plCache = {key: key, ids: ids, at: now, since: plCache && plCache.key === key ? plCache.since : now};
+    return ids;
+  }
   // 再生リストの次 / 前の動画へ。パソコン版はプレイヤー自身が再生リストを持っているので nextVideo / previousVideo でよいが、
   // スマホ版はプレイヤーが再生リストを持たず（getPlaylist() が空で nextVideo が空振りする）、ページ側の一覧
   // （ytm-playlist-panel-video-renderer）が順番を管理している。そこから今の動画の次 / 前の項目を探して開く。
@@ -279,7 +297,7 @@
     if (!pendingStep) return;
     const delta = pendingStep.delta;
     const p = player();
-    const list = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
+    const list = playerIds(p);
     if (list && list.length) {
       pendingStep = null;
       if (delta > 0) p.nextVideo(); else p.previousVideo();
@@ -319,8 +337,8 @@
   let played = [], history = [], playedList = null, jumpedAt = 0, restartFor = null, lastRestart = 0, lastCheck = 0;
   function items() {
     const p = player();
-    const ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
-    if (ids && ids.length) return {source: 'player', ids: Array.from(ids), go: i => p.playVideoAt(i)};
+    const ids = playerIds(p);
+    if (ids.length) return {source: 'player', ids: Array.from(ids), go: i => p.playVideoAt(i)};
     const links = panelLinks();
     return {source: 'page', ids: links.map(a => new URL(a.href, location.href).searchParams.get('v')),
             go: i => links[i].click()};
@@ -356,8 +374,8 @@
     if (onMobile() || !settings.offline || currentList() !== 'PPSV') return null;
     const x = settings.offline_list, order = x && (settings.orders || {})[x];
     if (!order || !order.length) return null;
-    const p = player(), ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
-    if (!ids || !ids.length || !listReady(p)) return null;  // ページ内の移動の直後で、まだ前の一覧のとき
+    const p = player(), ids = playerIds(p);
+    if (!ids.length || !listReady(p)) return null;  // ページ内の移動の直後で、まだ前の一覧のとき
     const saved = Array.from(ids);
     return {list: x, order: order, saved: saved, avail: order.filter(v => saved.includes(v)),
             go: v => {
@@ -416,8 +434,7 @@
   let staleList = null;
   function playerListSig(p) {
     const id = p && typeof p.getPlaylistId === 'function' ? p.getPlaylistId() : null;
-    const ids = p && typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
-    return String(id) + '|' + (ids ? Array.from(ids).join(',') : '');
+    return String(id) + '|' + playerIds(p).join(',');
   }
   function listReady(p) {
     if (!staleList) return true;
@@ -526,7 +543,7 @@
     log('移った曲が流れ始めない（' + moving.tries + ' 回目）: 今 ' + ((d && d.video_id) || '-') + ' 状態 ' + state + ' ' +
         fmt(p.getCurrentTime()) + ' / ' + playerDetail());
     if (moving.tries === 1) {
-      const ids = typeof p.getPlaylist === 'function' ? Array.from(p.getPlaylist() || []) : [];
+      const ids = playerIds(p);
       const i = ids.indexOf(moving.v);
       jumpedAt = Date.now();
       if (!here && i >= 0) {
@@ -577,7 +594,7 @@
     if (!v || v === 'end') return false;
     if (sc.saved.includes(v)) { openSide(sc.list, v, true); return true; }
     if (!settings.shuffle) return false;
-    const p = player(), ids = p && typeof p.getPlaylist === 'function' ? Array.from(p.getPlaylist() || []) : [];
+    const p = player(), ids = playerIds(p);
     const i = ids.indexOf(v);
     if (i < 0) return false;
     jumpedAt = Date.now();
@@ -590,8 +607,8 @@
   }
   // 曲順と保存済みの控え。パソコン版のプレイヤーだけが一覧を持っている。変わったら true
   function rememberLists(p) {
-    const ids = typeof p.getPlaylist === 'function' ? p.getPlaylist() : null, id = currentList();
-    if (onMobile() || !ids || !ids.length || !id || pendingNav || !listReady(p)) return false;  // 移っている途中は覚えない
+    const ids = playerIds(p), id = currentList();
+    if (onMobile() || !ids.length || !id || pendingNav || !listReady(p)) return false;  // 移っている途中は覚えない
     const list = Array.from(ids).slice(0, 1000);
     const same = a => Array.isArray(a) && a.length === list.length && a.every((v, i) => v === list[i]);
     if (id === 'PPSV') {
@@ -1334,7 +1351,7 @@
       'YT Player v' + VERSION + ' · ' + MODE + ' · ' + location.hostname,
       'ページ: ' + u.pathname + ' v=' + (u.searchParams.get('v') || '-') + ' list=' + (u.searchParams.get('list') || '-'),
       'プレイヤー: ' + (p ? '状態 ' + p.getPlayerState() + ' / ' + fmt(p.getCurrentTime()) + ' / ' + fmt(p.getDuration()) +
-                       ' / 一覧 ' + ((typeof p.getPlaylist === 'function' && p.getPlaylist()) || []).length + ' 曲' : 'なし') +
+                       ' / 一覧 ' + playerIds(p).length + ' 曲' : 'なし') +
         (playerError() ? ' / エラー: ' + playerError() : ''),
       'プレイヤーの詳細: ' + playerDetail(),
       '動画のデータ（このページを開いてから）: ' + mediaText(),
@@ -1500,7 +1517,7 @@
       lastRemember = Date.now();
       if (rememberLists(p)) {
         save();
-        log((id === 'PPSV' ? '保存済みの一覧' : '曲順') + 'を覚えた（' + p.getPlaylist().length + ' 曲）');
+        log((id === 'PPSV' ? '保存済みの一覧' : '曲順') + 'を覚えた（' + playerIds(p).length + ' 曲）');
       }
     }
     // 保存分の側にいるのに流せる曲がないとき（保存済みが 1 曲もない・この再生リストの曲がない）は、通信する側へ戻す。
@@ -1511,7 +1528,8 @@
       // ↑ 再生できている（再生中・停止中）ときだけ判断する。読み込みが終わっていない間はプレイヤーの一覧がまだ空で、
       //   「保存済みの曲がない」と誤って判断して控えを消してしまう（0.24 の実機の記録）
       whyLogged = true;
-      const ids = typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;
+      const raw = typeof p.getPlaylist === 'function' ? p.getPlaylist() : null;  // 1 回だけなのでその場で読む（null と空を見分ける）
+      const ids = raw ? Array.from(raw) : null;
       const order = (settings.orders || {})[settings.offline_list];
       log('保存分で流せない: ' + (!order ? '曲順の控えがない' : !ids || !ids.length ? '保存済みの曲がない' : 'この再生リストの曲が保存されていない') +
           ' → 通信する側へ戻す');
@@ -1713,7 +1731,7 @@
     if (listSig && (pendingNav || !listReady(p))) return;  // ページ内で移っている途中は、前の一覧のまま
     learnTitles();
     const vt = virtual(), sc = vt ? null : streamCtx();
-    const ids = vt ? vt.order : sc ? sc.order : (p.getPlaylist ? Array.from(p.getPlaylist() || []) : []);
+    const ids = vt ? vt.order : sc ? sc.order : playerIds(p);
     const saved = vt ? vt.saved : sc ? sc.saved : [];
     if (!ids.length && listSig) return;  // 曲送りの直後などで一瞬空になる。作り直さない
     const sig = ids.join(',') + '|' + saved.length;

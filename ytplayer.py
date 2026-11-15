@@ -24,7 +24,7 @@ TOKEN_FILE = DATA_DIR / "token.json"
 CLIENT_SECRET_FILE = APP_DIR / "client_secret.json"
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
-VERSION = "0.32"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
+VERSION = "0.33"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
 MAIN_TITLE = f"YT Player v{VERSION}"
 MINI_TITLE = f"YT Player mini v{VERSION}"
 ICON_FILE = APP_DIR / "ytplayer.ico"
@@ -571,9 +571,22 @@ BAR_JS = r"""
   function currentVideo() {
     try { return new URL(location.href).searchParams.get('v'); } catch (e) { return null; }
   }
+  // プレイヤーの曲の一覧（getPlaylist）。一時停止中は呼ぶたびに YouTube の中にメモリが残り、再生を始めるまで片付かない
+  // （0.5 秒ごとに呼んでいて 3 分で約 70 MB、出かけている間に Out of Memory で落ちた。0.33）。
+  // 曲か URL が変わったときだけ呼び直す。曲送りの直後は一瞬空なので、空のときは 1 秒おき（10 秒たったら 30 秒おき）に呼び直す。
+  let plCache = null;
+  function playlistIds(p) {
+    if (!p || !p.getPlaylist) return [];
+    const key = ((p.getVideoData && p.getVideoData()) || {}).video_id + '|' + location.href, now = Date.now();
+    if (plCache && plCache.key === key &&
+        (plCache.ids.length || now - plCache.at < (now - plCache.since < 10000 ? 1000 : 30000))) return plCache.ids;
+    const ids = [...(p.getPlaylist() || [])];
+    plCache = {key: key, ids: ids, at: now, since: plCache && plCache.key === key ? plCache.since : now};
+    return ids;
+  }
   function items() {
     const p = player();
-    const ids = p && p.getPlaylist ? p.getPlaylist() : null;
+    const ids = playlistIds(p);
     if (ids && ids.length) return {source: 'player', ids: [...ids], go: i => p.playVideoAt(i)};
     const links = [...document.querySelectorAll('ytd-playlist-panel-video-renderer')]
       .map(item => item.querySelector('a[href*="/watch"]')).filter(Boolean);
@@ -846,7 +859,7 @@ BAR_JS = r"""
   // 一覧を作り直すのは曲の並びが変わったときだけにし、曲名は覚えておいて、新しく分かったものだけ書き換える。
   const titleCache = {};
   function paintList(p, cur) {
-    const ids = p.getPlaylist ? [...(p.getPlaylist() || [])] : [];
+    const ids = playlistIds(p);
     if (!ids.length && listSig) return;
     const titles = Object.assign(titleCache, panelTitles());
     const sig = ids.join(',');
