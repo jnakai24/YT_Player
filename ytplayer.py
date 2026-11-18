@@ -24,7 +24,7 @@ TOKEN_FILE = DATA_DIR / "token.json"
 CLIENT_SECRET_FILE = APP_DIR / "client_secret.json"
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
-VERSION = "0.33"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
+VERSION = "0.34"  # YouTube のページの作りに頼っているので、どの版で動いていたか分かるようにタイトルに出す
 MAIN_TITLE = f"YT Player v{VERSION}"
 MINI_TITLE = f"YT Player mini v{VERSION}"
 ICON_FILE = APP_DIR / "ytplayer.ico"
@@ -146,10 +146,17 @@ PAGE_PLAYLISTS_JS = r"""
         const badge = (s.match(/"text":"([^"]*?(?:本の動画|エピソード|レッスン|ミックスリスト|videos?|episodes?|lessons?|Mix)[^"]*)"/) || [])[1];
         const vid = (s.match(/"watchEndpoint":\{"videoId":"([\w-]{11})"/) || [])[1];
         const n = badge && badge.match(/^([\d,]+) 本の動画$/);
+        // 自分の再生リストか：他人のもの（保存した再生リスト・コース・ポッドキャスト）は情報欄の最初がチャンネル名で、チャンネルへのリンク（commandRuns）が付く。
+        // 自分のものはそこが「公開 / 非公開 / 限定公開」でリンクがない（0.34 で確認。高く評価した動画・後で見るも自分の側）
+        let mine = null;
+        try {
+          const part = l.metadata.lockupMetadataViewModel.metadata.contentMetadataViewModel.metadataRows[0].metadataParts[0];
+          if (part && part.text) mine = !part.text.commandRuns;
+        } catch (e) {}
         // ミックスリスト（ID が RD で始まる）は、YouTube が自動で作る終わりのない並びなので出さない（ユーザーの希望）
         if (l.contentId && title && !/^RD/.test(l.contentId) && !seen.has(l.contentId)) {
           seen.add(l.contentId);
-          out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null});
+          out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null, mine: mine});
         }
         return;
       }
@@ -227,6 +234,14 @@ DIAG_JS = r"""
       out.push(['曲の一覧', it.ids.length > 0,
                 it.ids.length ? it.ids.length + ' 曲（' + (it.source === 'player' ? 'プレイヤーから' : 'ページの一覧から') + '）'
                               : '読めません（シャッフル・全曲リピートが効きません）']);
+      // 並べ替え（自分の再生リストだけ）：ページの一覧に isEditable と各曲の playlistSetVideoId があるか
+      const r = [...document.querySelectorAll('ytd-playlist-panel-renderer')].find(e => e.data && e.data.playlistId === list);
+      if (!r) out.push(['並べ替え', false, 'ページの再生リストの一覧が見つかりません']);
+      else if (!r.data.isEditable) out.push(['並べ替え', null, '自分の再生リストではないので並べ替えられません']);
+      else {
+        const n = (r.data.contents || []).filter(c => c.playlistPanelVideoRenderer && c.playlistPanelVideoRenderer.playlistSetVideoId).length;
+        out.push(['並べ替え', n > 0, n ? n + ' 曲を並べ替えられます' : '曲の情報（playlistSetVideoId）がありません']);
+      }
     }
   }
   return JSON.stringify(out);
@@ -269,7 +284,7 @@ def fetch_playlists():
     from google.auth.transport.requests import AuthorizedSession
 
     session = AuthorizedSession(get_credentials())
-    items = [{"id": LIKED_ID, "title": "高く評価した動画", "count": None}]
+    items = [{"id": LIKED_ID, "title": "高く評価した動画", "count": None, "mine": True}]
     page_token = None
     while True:
         params = {"part": "snippet,contentDetails", "mine": "true", "maxResults": 50}
@@ -283,6 +298,7 @@ def fetch_playlists():
                 "id": it["id"],
                 "title": it["snippet"]["title"],
                 "count": it.get("contentDetails", {}).get("itemCount"),
+                "mine": True,  # mine=true で取っているので全部自分のもの
             })
         page_token = data.get("nextPageToken")
         if not page_token:
@@ -536,9 +552,18 @@ BAR_JS = r"""
   function fill(list, selected) {
     playlists = list || [];
     sel.replaceChildren(el('option', {value: '', textContent: '— 再生リスト —'}));
-    for (const p of list || []) {
-      const label = p.count == null ? p.title : p.title + ' (' + p.count + ')';
-      sel.append(el('option', {value: p.id, textContent: label}));
+    // 自分の再生リストと、保存した他人の再生リストを分けて出す（mine がない古い一覧はそのまま）
+    const groups = (list || []).some(p => p.mine === false || p.mine === true)
+      ? [['自分の再生リスト', (list || []).filter(p => p.mine !== false)], ['保存した再生リスト（他の人）', (list || []).filter(p => p.mine === false)]]
+      : [[null, list || []]];
+    for (const [name, ps] of groups) {
+      if (!ps.length) continue;
+      const box = name ? el('optgroup', {label: name}) : sel;
+      for (const p of ps) {
+        const label = p.count == null ? p.title : p.title + ' (' + p.count + ')';
+        box.append(el('option', {value: p.id, textContent: label}));
+      }
+      if (box !== sel) sel.append(box);
     }
     sel.value = selected || '';
     if (sel.value !== (selected || '')) sel.value = '';
@@ -584,9 +609,91 @@ BAR_JS = r"""
     plCache = {key: key, ids: ids, at: now, since: plCache && plCache.key === key ? plCache.since : now};
     return ids;
   }
+  // ---- 自分の再生リストの並べ替え（0.34）----
+  // YouTube のページと同じ内部 API（/youtubei/v1/browse/edit_playlist）で、曲（playlistSetVideoId）を別の曲の後ろ / 前へ動かす。
+  // 並べ替えてもプレイヤーの一覧（getPlaylist）とページの一覧は古い順のまま（PC で確認）なので、新しい順を edited に覚え、
+  // それが本当の順になる（ページ内で曲を移ると YouTube が一覧を読み直す）までは、曲送りを edited の順で openWatch して行う。
+  let edited = null;  // {list, ids}
+  async function ytApi(path, body) {
+    const cfg = window.ytcfg && window.ytcfg.get ? window.ytcfg : null;
+    const sid = (document.cookie.match(/(?:^|; )SAPISID=([^;]+)/) || document.cookie.match(/(?:^|; )__Secure-3PAPISID=([^;]+)/) || [])[1];
+    if (!cfg || !sid) throw new Error('ログイン情報を読めません');
+    const ts = Math.floor(Date.now() / 1000);
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(ts + ' ' + sid + ' ' + location.origin));
+    const hash = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+    const r = await fetch(path + '?prettyPrint=false', {
+      method: 'POST', credentials: 'include',
+      headers: {'Content-Type': 'application/json', 'Authorization': 'SAPISIDHASH ' + ts + '_' + hash,
+                'X-Origin': location.origin, 'X-Goog-AuthUser': String(cfg.get('SESSION_INDEX') || 0)},
+      body: JSON.stringify(Object.assign({context: cfg.get('INNERTUBE_CONTEXT')}, body))
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+  // ページの再生リストの一覧（ytd-playlist-panel-renderer）から、並べ替えられるか（isEditable。自分の再生リストだけ true）と、各曲の playlistSetVideoId
+  function panelInfo() {
+    const list = currentList();
+    for (const r of document.querySelectorAll('ytd-playlist-panel-renderer')) {
+      const d = r.data;
+      if (!d || d.playlistId !== list) continue;
+      const sets = {};
+      for (const c of d.contents || []) {
+        const v = c.playlistPanelVideoRenderer;
+        if (v && v.videoId && v.playlistSetVideoId) sets[v.videoId] = v.playlistSetVideoId;
+      }
+      return {editable: !!d.isEditable, sets: sets, params: (((d.onReorderEndpoint || {}).playlistEditEndpoint) || {}).params};
+    }
+    return {editable: false, sets: {}};
+  }
+  // 並べ替えたあと、プレイヤーの一覧がまだ古い順か。新しい順に追いついたら（または別の再生リストへ移ったら）edited を消す
+  function editedActive(ids) {
+    if (!edited) return false;
+    if (edited.list !== currentList() || (ids && ids.length && ids.join(',') === edited.ids.join(','))) { edited = null; return false; }
+    return true;
+  }
+  function watchUrl(v) { return '/watch?v=' + encodeURIComponent(v) + '&list=' + encodeURIComponent(currentList()); }
+  let reorderBusy = Promise.resolve();
+  // 曲 v を、並べ替えたあとの順で to 番目（0 始まり）に置く。表示はすぐ変え、YouTube に断られたら元に戻す
+  function reorder(ids, v, to) {
+    const from = ids.indexOf(v);
+    if (from < 0 || from === to) return;
+    const info = panelInfo(), list = currentList();
+    const next = ids.filter(x => x !== v);
+    next.splice(to, 0, v);
+    const pred = next[to - 1], succ = next[to + 1];
+    const action = pred
+      ? {action: 'ACTION_MOVE_VIDEO_AFTER', setVideoId: info.sets[v], movedSetVideoIdPredecessor: info.sets[pred]}
+      : {action: 'ACTION_MOVE_VIDEO_BEFORE', setVideoId: info.sets[v], movedSetVideoIdSuccessor: info.sets[succ]};
+    if (!info.editable || !action.setVideoId || !(action.movedSetVideoIdPredecessor || action.movedSetVideoIdSuccessor)) {
+      msg.textContent = 'この曲は並べ替えられません（ページの一覧に曲の情報がありません）';
+      msg.style.color = '#f88';
+      return;
+    }
+    const before = edited;
+    edited = {list: list, ids: next};
+    listSig = '';
+    paintView();
+    reorderBusy = reorderBusy.then(async () => {
+      try {
+        const j = await ytApi('/youtubei/v1/browse/edit_playlist', {playlistId: list, params: info.params || 'CAE%3D', actions: [action]});
+        if (j && j.status && j.status !== 'STATUS_SUCCEEDED') throw new Error(j.status);
+        msg.textContent = '';
+      } catch (e) {
+        if (edited && edited.ids === next) edited = before;
+        listSig = '';
+        paintView();
+        msg.textContent = '並べ替えできませんでした: ' + ((e && e.message) || e);
+        msg.style.color = '#f88';
+      }
+    });
+  }
   function items() {
     const p = player();
     const ids = playlistIds(p);
+    if (editedActive(ids)) {
+      const order = edited.ids;
+      return {source: 'edited', ids: [...order], go: i => openWatch(watchUrl(order[i]))};
+    }
     if (ids && ids.length) return {source: 'player', ids: [...ids], go: i => p.playVideoAt(i)};
     const links = [...document.querySelectorAll('ytd-playlist-panel-video-renderer')]
       .map(item => item.querySelector('a[href*="/watch"]')).filter(Boolean);
@@ -617,6 +724,16 @@ BAR_JS = r"""
       else if (history.length) {
         const it = items(), i = it.ids.indexOf(history.pop());
         if (i >= 0) { go(it, i); return; }
+      }
+    }
+    // 並べ替えたあとはプレイヤーの一覧が古い順なので、新しい順で次 / 前の曲へ
+    const it = items();
+    if (it.source === 'edited') {
+      const i = it.ids.indexOf(currentVideo());
+      if (i >= 0) {
+        const j = i + delta;
+        go(it, j >= it.ids.length ? 0 : Math.max(0, j));  // 最後の曲の次は先頭（今までの動きと同じ）
+        return;
       }
     }
     if (delta > 0) p.nextVideo(); else p.previousVideo();
@@ -656,6 +773,8 @@ BAR_JS = r"""
     if (i >= 0 && i === it.ids.length - 1 && !(total > it.ids.length)) {
       if (mode.repeat === 'off') pauseTop = {v: it.ids[0], at: Date.now()};
       go(it, 0);
+    } else if (i >= 0 && i + 1 < it.ids.length && it.source === 'edited') {
+      go(it, i + 1);  // 並べ替えたあと。YouTube に任せると古い順で次の曲へ進む
     }
   }
   document.addEventListener('timeupdate', checkEnd, true);
@@ -858,13 +977,55 @@ BAR_JS = r"""
   // 曲送りの間は、ページの一覧が作り直されて曲名が取れない・プレイヤーの一覧が一瞬空になる。
   // 一覧を作り直すのは曲の並びが変わったときだけにし、曲名は覚えておいて、新しく分かったものだけ書き換える。
   const titleCache = {};
+  // 並べ替え：自分の再生リストのときだけ、各曲の左に持ち手（⠿）を出し、上下にドラッグして離したところへ動かす。
+  // HTML のドラッグ＆ドロップ（draggable）ではなくマウスの押す・動かす・離すで行う（WebView2 で確実に動き、CDP からも試せるため）
+  let drag = null;  // {v, item, ids, to}
+  const dropLine = el('div', {}, {position: 'absolute', left: '0', right: '0', height: '2px', background: '#7fb2ff',
+                                  pointerEvents: 'none', display: 'none', zIndex: '1'});
+  listBox.style.position = 'relative';
+  function dragTarget(y) {
+    const kids = [...listBox.children].filter(c => c !== dropLine);
+    let to = kids.length;
+    for (let i = 0; i < kids.length; i++) {
+      const r = kids[i].getBoundingClientRect();
+      if (y < r.top + r.height / 2) { to = i; break; }
+    }
+    const ref = kids[Math.min(to, kids.length - 1)];
+    const top = to < kids.length ? ref.offsetTop : ref.offsetTop + ref.offsetHeight;
+    return {to: to, top: top};
+  }
+  document.addEventListener('mousemove', e => {
+    if (!drag) return;
+    // 一覧の上下の端に近づいたらスクロール
+    const box = listBox.getBoundingClientRect();
+    if (e.clientY < box.top + 30) listBox.scrollTop -= 12;
+    else if (e.clientY > box.bottom - 30) listBox.scrollTop += 12;
+    const t = dragTarget(e.clientY);
+    drag.to = t.to;
+    Object.assign(dropLine.style, {display: 'block', top: (t.top - 1) + 'px'});
+  }, true);
+  document.addEventListener('mouseup', () => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    dropLine.style.display = 'none';
+    d.item.style.opacity = '';
+    const from = d.ids.indexOf(d.v);
+    // 抜いたあとの位置にする（自分より下へ動かすときは 1 つ前にずれる）
+    if (d.to != null) reorder(d.ids, d.v, d.to > from ? d.to - 1 : d.to);
+  }, true);
   function paintList(p, cur) {
-    const ids = playlistIds(p);
+    const pids = playlistIds(p);
+    const ids = editedActive(pids) ? edited.ids : pids;
     if (!ids.length && listSig) return;
     const titles = Object.assign(titleCache, panelTitles());
-    const sig = ids.join(',');
+    const info = panelInfo();
+    const canEdit = info.editable && ids.length > 1 && ids.every(v => info.sets[v]);
+    const sig = ids.join(',') + '|' + canEdit;
+    if (drag && sig !== listSig) { drag.item.style.opacity = ''; drag = null; dropLine.style.display = 'none'; }
     if (sig === listSig) {
       for (const item of listBox.children) {
+        if (item === dropLine) continue;
         const t = titles[item.dataset.v];
         if (t && item.title !== t) { item.title = t; item.lastChild.textContent = t; }
       }
@@ -879,23 +1040,43 @@ BAR_JS = r"""
                        {width: '96px', height: '54px', objectFit: 'cover', borderRadius: '4px', flex: 'none', background: '#222'});
         const name = el('div', {textContent: titles[v] || v}, {fontSize: '13px', lineHeight: '1.35', overflow: 'hidden',
                                                                display: '-webkit-box', webkitLineClamp: '2', webkitBoxOrient: 'vertical'});
+        if (canEdit) {
+          const grip = el('span', {textContent: '⠿', title: 'ドラッグして並べ替え（YouTube の再生リストの順が変わります）'},
+                          {color: '#777', cursor: 'grab', fontSize: '16px', flex: 'none', padding: '0 2px', marginRight: '-6px'});
+          grip.addEventListener('mousedown', e => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            drag = {v: v, item: item, ids: [...ids], to: null};
+            item.style.opacity = '.45';
+          });
+          grip.addEventListener('click', e => e.stopPropagation());
+          item.append(grip);
+        }
         item.append(el('span', {textContent: String(i + 1)}, {color: '#777', fontSize: '12px', width: '22px', textAlign: 'right', flex: 'none'}), img, name);
         item.addEventListener('mouseenter', () => { if (item.dataset.v !== shownCur) item.style.background = '#262626'; });
         item.addEventListener('mouseleave', () => { if (item.dataset.v !== shownCur) item.style.background = ''; });
-        item.addEventListener('click', () => go({go: j => p.playVideoAt(j)}, i));
+        // 並べ替えたあとは表示の順とプレイヤーの順が違うので、番号ではなく曲 ID で移る
+        item.addEventListener('click', () => { const it = items(), j = it.ids.indexOf(v); if (j >= 0) go(it, j); });
         return item;
-      }));
+      }), dropLine);
     }
     if (cur !== shownCur) {
       shownCur = cur;
       for (const item of listBox.children) {
+        if (item === dropLine) continue;
         const on = item.dataset.v === cur;
         item.style.background = on ? '#3a3a3a' : '';
         if (on) item.scrollIntoView({block: 'nearest'});
       }
     }
     const opt = sel.selectedOptions[0];
-    sideHead.textContent = (opt && opt.value ? opt.textContent : '再生リスト') + (ids.length ? '  ·  ' + (ids.indexOf(cur) + 1) + ' / ' + ids.length : '');
+    const pl = playlists.find(x => x.id === currentList());
+    const whose = pl && pl.mine === true ? '自分' : pl && pl.mine === false ? '他の人' : '';
+    sideHead.textContent = (whose ? '[' + whose + '] ' : '') + (opt && opt.value ? opt.textContent : '再生リスト') +
+      (ids.length ? '  ·  ' + (ids.indexOf(cur) + 1) + ' / ' + ids.length : '') + (canEdit ? '  ·  ⠿ で並べ替え' : '');
+    sideHead.title = sideHead.textContent;
+    sideHead.style.color = whose === '自分' ? '#9cf' : '#aaa';
   }
   function paintView() {
     place();
@@ -1000,8 +1181,16 @@ MINI_HTML = r"""<!doctype html>
   function fill(list, selected) {
     const sel = $('sel');
     sel.replaceChildren(new Option('— 再生リスト —', ''));
-    for (const p of list || []) {
-      sel.append(new Option(p.count == null ? p.title : p.title + ' (' + p.count + ')', p.id));
+    // 自分の再生リストと、保存した他人の再生リストを分けて出す（プレイヤー画面のバーと同じ）
+    const groups = (list || []).some(p => p.mine === false || p.mine === true)
+      ? [['自分の再生リスト', (list || []).filter(p => p.mine !== false)], ['保存した再生リスト（他の人）', (list || []).filter(p => p.mine === false)]]
+      : [[null, list || []]];
+    for (const [name, ps] of groups) {
+      if (!ps.length) continue;
+      const box = name ? document.createElement('optgroup') : sel;
+      if (name) box.label = name;
+      for (const p of ps) box.append(new Option(p.count == null ? p.title : p.title + ' (' + p.count + ')', p.id));
+      if (box !== sel) sel.append(box);
     }
     sel.value = selected || '';
     if (sel.value !== (selected || '')) sel.value = '';
