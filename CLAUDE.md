@@ -30,12 +30,12 @@ Chrome を使わずに、自分の YouTube アカウントで再生リストを�
 - **YouTube のページに頼っている部分を変えたら VERSION を上げる。** 壊れたときにどの版で動いていたか分かるようにするため。
 - タイトルを変えると `already_running()` と `tools/win.ps1` のウィンドウ検索に影響する（どちらも VERSION から作っている）。
   **VERSION を上げたあとは、古い版で動いている YT Player を `win.ps1 close` で閉じられない**（新しい題名で探すため）。そのまま起動すると `already_running()` で何も言わずに終わり、古い版が動き続ける。古い版はプロセスの `CloseMainWindow()` で閉じる。
-- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.33）を**両方**上げる。
-  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.33 · page` と出る。
+- Firefox 版は `android/ytplayer.user.js` の `@version` と `VERSION`（現在 0.34）を**両方**上げる。
+  Violentmonkey は `@version` が上がったときだけ更新を取り込む。版は ⚙ の行に `v0.34 · page` と出る。
 
 ## 今の状況（2026-11-18 時点。変わったら書き直す）
 
-Windows 版 0.34（自分の再生リストと他の人の再生リストを分けて表示、アプリの画面の曲の一覧で自分の再生リストを並べ替え。下の「自分の再生リストの見分けと並べ替え」。PC で確認、push 済み。Firefox 版にはまだない）。Windows 版 0.33・Firefox 版 0.33（一時停止のまま放っておくと Out of Memory で落ちていたのを直した。下の「getPlaylist() のメモリ」。PC で確認、push 済み。実機は未確認）。0.32（プルダウンからミックスリストを外した・再生リストを切り替えるたびに読み直していたのを直した。push 済み。Firefox 版の一覧の取得は PC で試せていない）。0.31（最後の曲のあと先頭で止める。PC で確認、push 済み。実機は未確認）。その前は Windows 版 0.3・Firefox 版 0.30（push 済み）。Firefox 版のアプリの画面・全画面・× は実機で確認済み（2026-11-11）。細かい仕組みと経緯は、下のそれぞれの節にある。
+Windows 版 0.34・Firefox 版 0.34（自分の再生リストと他の人の再生リストを分けて表示、アプリの画面の曲の一覧で自分の再生リストを並べ替え。下の「自分の再生リストの見分けと並べ替え」。どちらも PC で確認、push 済み。Firefox 版は保存分の側（PPSV）での並べ替えと、実機の指でのドラッグは未確認）。Windows 版 0.33・Firefox 版 0.33（一時停止のまま放っておくと Out of Memory で落ちていたのを直した。下の「getPlaylist() のメモリ」。PC で確認、push 済み。実機は未確認）。0.32（プルダウンからミックスリストを外した・再生リストを切り替えるたびに読み直していたのを直した。push 済み。Firefox 版の一覧の取得は PC で試せていない）。0.31（最後の曲のあと先頭で止める。PC で確認、push 済み。実機は未確認）。その前は Windows 版 0.3・Firefox 版 0.30（push 済み）。Firefox 版のアプリの画面・全画面・× は実機で確認済み（2026-11-11）。細かい仕組みと経緯は、下のそれぞれの節にある。
 
 ### 実機で確かめたこと
 
@@ -108,7 +108,7 @@ Windows 版 0.34（自分の再生リストと他の人の再生リストを分�
   ページ内の移動の確かめ（Windows 版 `openWatch()` は 3 秒後、Firefox 版 `checkNav()` は 4 秒後）が「選んだ曲にいない」を失敗とみなし、
   すでに次の曲へ進んでいたのに `t=` 付きで読み直していた。読み直した先ではバーが入る前に曲が終わり、YouTube がおすすめの動画へ進む。
   今は「URL が変わらなかった」ときだけ読み直す。**比べる URL は yt-navigate を送る前に読む**（YouTube は受けるとその場で URL を書き換える。0.31 の Windows 版は送ったあとに読んでいて、切り替えのたびに読み直していた。0.32 で直した）。位置は、Windows 版も終わりの 10 秒以内なら 0 秒で覚える（Firefox 版は前から）。
-- **自分の再生リストの見分けと並べ替え**（Windows 版 0.34）：
+- **自分の再生リストの見分けと並べ替え**（Windows 版・Firefox 版 0.34）：
   - 見分け：`/feed/playlists` の `lockupViewModel` の情報欄の最初（`metadataRows[0].metadataParts[0].text`）が、他の人のものはチャンネル名で
     チャンネルへのリンク（`commandRuns`）が付く。自分のものは「公開 / 非公開 / 限定公開」でリンクがない（高く評価した動画・後で見る・お気に入りも自分の側）。
     一覧の各項目の `mine`（Data API で取ったときは全部 true）。プルダウン（バー・ミニ）は optgroup で「自分の再生リスト」「保存した再生リスト（他の人）」に分ける。
@@ -120,6 +120,12 @@ Windows 版 0.34（自分の再生リストと他の人の再生リストを分�
     **並べ替えても、プレイヤーの一覧（`getPlaylist()`）とページの一覧は古い順のまま**（PC で確認）。新しい順を `edited` に覚え、その間は `items()` が
     新しい順を返して曲送り・曲の終わり・一覧のクリックを `openWatch()` で行う。ページ内で曲を移ると YouTube が一覧を読み直し、新しい順に追いつく → `edited` を消す。
     PC では「PMP」（ユーザーの非公開・3 曲）で上へ・先頭へ・一番下へを試し、元の順に戻した（ユーザーの了承を得て）。
+  - **Firefox 版**（0.34）：見分けとプルダウンの分け方は同じ。並べ替えは www のアプリの画面だけ。保存分の側（PPSV）のページの一覧には setVideoId がないので、
+    再生リストそのものを内部 API（`browse` の `browseId: 'VL' + ID`、100 曲ずつ続きあり）で読む（`loadEdit()` / `editFor()`）。`playlistVideoListRenderer.canReorder` が
+    true のときだけ持ち手を出す（自分の再生リスト。後で見るは false、高く評価した動画は中身が出ない。PC で確認）。各曲は `playlistVideoRenderer.setVideoId`。
+    ドラッグは指でも動くよう pointer イベント（持ち手に `touch-action: none` と `setPointerCapture`）。落とす場所は枠線で出す（zoom で拡大しているため）。
+    並べ替えたら `settings.orders[ID]`（オフライン優先の曲順）もその場で書き換え、通信する側では `edited` の間 `rememberLists()` が古い順で上書きしない。
+    PC の YT Player で PMP を使って、先頭へ・一番下へのドラッグ、⏭ が新しい順で進むこと、診断を確かめ、元の順に戻した。
 - **自己診断**（バー・ミニの「診断」、Firefox 版は ⚙ の中）：上の頼っている部分が使えるかを確かめる（`Api.diagnose()` / `DIAG_JS`、Firefox 版は `diagnose()`）。
   頼る部分を増やしたら、診断の項目にも足す。
 - **再生リストごとの位置**：settings の `positions[再生リスト ID] = {url, time, at}`（Firefox 版は localStorage `ytp-settings` の同じ名前）。

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YT Player (Firefox)
 // @namespace    jnaka.ytplayer
-// @version      0.33
+// @version      0.34
 // @description  YouTube のページに再生リストのプルダウンと再生操作のバーを足す（YT Player の Firefox / Android 版）
 // @match        https://m.youtube.com/*
 // @match        https://www.youtube.com/*
@@ -15,7 +15,7 @@
 
 (function () {
   'use strict';
-  const VERSION = '0.33';
+  const VERSION = '0.34';
   // 一覧の取得は、スマホ版（MWEB）として問い合わせると空が返るので、パソコン版（WEB）として問い合わせる。
   // 古すぎると断られることがあるので、壊れたらパソコン版のページの ytcfg INNERTUBE_CLIENT_VERSION に合わせる。
   const WEB_CLIENT_VERSION = '2.20261105.05.01';
@@ -290,6 +290,12 @@
         if (i >= 0) { go(it, i); return; }
       }
     }
+    // 並べ替えたあとはプレイヤーの一覧が古い順なので、新しい順で次 / 前の曲へ（最後の曲の次は先頭）
+    const it = items();
+    if (it.source === 'edited') {
+      const i = it.ids.indexOf(currentVideo());
+      if (i >= 0) { const j = i + delta; go(it, j >= it.ids.length ? 0 : Math.max(0, j)); return; }
+    }
     pendingStep = {delta: delta, until: Date.now() + 10000};
     tryStep();
   }
@@ -338,6 +344,11 @@
   function items() {
     const p = player();
     const ids = playerIds(p);
+    // 並べ替えたあと（プレイヤーの一覧がまだ古い順）は、新しい順でページ内を移る
+    if (editedActive(ids)) {
+      const order = edited.ids, list = edited.list;
+      return {source: 'edited', ids: Array.from(order), go: i => navigate('/watch?v=' + order[i] + '&list=' + list, 0)};
+    }
     if (ids.length) return {source: 'player', ids: Array.from(ids), go: i => p.playVideoAt(i)};
     const links = panelLinks();
     return {source: 'page', ids: links.map(a => new URL(a.href, location.href).searchParams.get('v')),
@@ -609,6 +620,7 @@
   function rememberLists(p) {
     const ids = playerIds(p), id = currentList();
     if (onMobile() || !ids.length || !id || pendingNav || !listReady(p)) return false;  // 移っている途中は覚えない
+    if (editedActive(ids)) return false;  // 並べ替えた直後。プレイヤーの一覧は古い順なので、覚えた新しい順を上書きしない
     const list = Array.from(ids).slice(0, 1000);
     const same = a => Array.isArray(a) && a.length === list.length && a.every((v, i) => v === list[i]);
     if (id === 'PPSV') {
@@ -736,6 +748,8 @@
     if (i >= 0 && i === it.ids.length - 1 && !(total > it.ids.length)) {
       if (repeat === 'off') setPauseTop(it.ids[0]);
       go(it, 0);
+    } else if (i >= 0 && i + 1 < it.ids.length && it.source === 'edited') {
+      go(it, i + 1);  // 並べ替えたあと。YouTube に任せると古い順で次の曲へ進む
     }
   }
   // スクリプトの中で起きたエラーも記録に残す（同じ内容は 1 回だけ）
@@ -793,10 +807,17 @@
         const badge = (s.match(/"text":"([^"]*?(?:本の動画|エピソード|レッスン|ミックスリスト|videos?|episodes?|lessons?|Mix)[^"]*)"/) || [])[1];
         const vid = (s.match(/"watchEndpoint":\{"videoId":"([\w-]{11})"/) || [])[1];
         const n = badge && badge.match(/^([\d,]+) 本の動画$/);
+        // 自分の再生リストか：他の人のものは情報欄の最初がチャンネル名で、チャンネルへのリンク（commandRuns）が付く。
+        // 自分のものはそこが「公開 / 非公開 / 限定公開」でリンクがない（Windows 版 0.34 で確認。高く評価した動画・後で見るも自分の側）
+        let mine = null;
+        try {
+          const part = l.metadata.lockupMetadataViewModel.metadata.contentMetadataViewModel.metadataRows[0].metadataParts[0];
+          if (part && part.text) mine = !part.text.commandRuns;
+        } catch (e) {}
         // ミックスリスト（ID が RD で始まる）は、YouTube が自動で作る終わりのない並びなので出さない（ユーザーの希望）
         if (l.contentId && title && !/^RD/.test(l.contentId) && !seen.has(l.contentId)) {
           seen.add(l.contentId);
-          out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null});
+          out.push({id: l.contentId, title: title, count: n ? n[1] : (badge || null), vid: vid || null, mine: mine});
         }
         return;
       }
@@ -815,14 +836,15 @@
     return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
   }
   function loggedIn() { return /(^|; )(SAPISID|__Secure-3PAPISID)=/.test(document.cookie); }
-  async function browse(body) {
+  function browse(body) { return innertube('/youtubei/v1/browse', body, '再生リストを読めませんでした'); }
+  async function innertube(path, body, failText) {
     const cookies = {};
     for (const c of document.cookie.split('; ')) cookies[c.slice(0, c.indexOf('='))] = c.slice(c.indexOf('=') + 1);
     const sapisid = cookies.SAPISID || cookies['__Secure-3PAPISID'];
     if (!sapisid) throw new Error('YouTube にログインしていません');
     const ts = Math.floor(Date.now() / 1000);
     const auth = 'SAPISIDHASH ' + ts + '_' + await sha1(ts + ' ' + sapisid + ' ' + location.origin);
-    const r = await fetch('/youtubei/v1/browse?prettyPrint=false', {
+    const r = await fetch(path + '?prettyPrint=false', {
       method: 'POST', credentials: 'include',
       headers: {'Content-Type': 'application/json', 'Authorization': auth,
                 'X-Origin': location.origin, 'X-Goog-AuthUser': '0'},
@@ -830,8 +852,118 @@
         context: {client: {clientName: 'WEB', clientVersion: WEB_CLIENT_VERSION, hl: 'ja', gl: 'JP'}}
       }, body))
     });
-    if (!r.ok) throw new Error('再生リストを読めませんでした（' + r.status + '）');
+    if (!r.ok) throw new Error(failText + '（' + r.status + '）');
     return r.json();
+  }
+
+  // ---- 自分の再生リストの並べ替え（0.34。Windows 版 0.34 と同じ内部 API）----
+  // アプリの画面の曲の一覧で、持ち手（⠿）を上下にドラッグして離したところへ動かす。YouTube のページと同じ
+  // /youtubei/v1/browse/edit_playlist に「この曲（setVideoId）をあの曲の後ろ / 前へ」と頼む。
+  // 曲ごとの setVideoId は、保存分の側（PPSV）のページの一覧にはないので、再生リストそのもの（browseId VL＋ID）を内部 API で読む（loadEdit）。
+  // playlistVideoListRenderer の canReorder が true のものだけ（自分の再生リスト。後で見るは false、高く評価した動画は中身が出ない。PC で確認）。
+  // 並べ替えてもプレイヤーの一覧（getPlaylist）は古い順のまま（Windows 版で確認）。新しい順を edited に覚え、そのリストを通信して流している間は
+  // 曲送りを edited の順で navigate して行う。オフライン優先の曲順（settings.orders）は、その場で新しい順に書き換える。
+  let editInfo = null;  // {list, sets: {videoId: setVideoId}, ids, canReorder, params, at, loading}
+  let edited = null;    // {list, ids}
+  function isOwn(id) {
+    const pl = (settings.playlists || []).find(x => x.id === id);
+    return !!pl && pl.mine === true;
+  }
+  async function loadEdit(list) {
+    const info = {list: list, sets: {}, ids: [], canReorder: false, params: null, at: Date.now(), loading: true};
+    editInfo = info;
+    try {
+      let token = null, pages = 0;
+      const take = root => {
+        let next = null;
+        (function walk(o) {
+          if (!o || typeof o !== 'object') return;
+          if (o.playlistVideoListRenderer) {
+            const r = o.playlistVideoListRenderer;
+            info.canReorder = !!r.canReorder;
+            info.params = ((r.onReorderEndpoint || {}).playlistEditEndpoint || {}).params || null;
+          }
+          if (o.playlistVideoRenderer) {
+            const v = o.playlistVideoRenderer;
+            if (v.videoId && v.setVideoId && !info.sets[v.videoId]) { info.sets[v.videoId] = v.setVideoId; info.ids.push(v.videoId); }
+            return;
+          }
+          if (o.continuationItemRenderer) {
+            const t = (JSON.stringify(o.continuationItemRenderer).match(/"continuationCommand":\{[^{}]*?"token":"([^"]+)"/) || [])[1];
+            if (t && !next) next = t;
+            return;
+          }
+          for (const k in o) walk(o[k]);
+        })(root);
+        return next;
+      };
+      token = take(await browse({browseId: 'VL' + list}));
+      while (token && pages < 20 && info.canReorder) {  // 100 曲ずつ。並べ替えられないものは先を読まない
+        const before = info.ids.length;
+        token = take(await browse({continuation: token}));
+        pages++;
+        if (info.ids.length === before) break;
+      }
+      log('並べ替えの準備 ' + list.slice(0, 6) + '… ' + info.ids.length + ' 曲' + (info.canReorder ? '' : '（並べ替えられない）'));
+    } catch (e) {
+      info.error = (e && e.message) || String(e);
+      log('並べ替えの準備ができない: ' + info.error);
+    }
+    info.loading = false;
+    if (editInfo === info) listSig = '';  // 一覧を作り直して持ち手を出す
+  }
+  // 並べ替えに使う情報。まだなければ読みに行き、読み終わるまでは null（10 分たったら読み直す）
+  function editFor(list) {
+    if (isMobile || !list || list === 'PPSV' || !isOwn(list)) return null;
+    if (!editInfo || editInfo.list !== list || (!editInfo.loading && Date.now() - editInfo.at > 600000)) { loadEdit(list); return null; }
+    return editInfo.loading ? null : editInfo;
+  }
+  // 並べ替えたあと、プレイヤーの一覧がまだ古い順か。新しい順に追いついたら（または別のリストへ移ったら）edited を消す
+  function editedActive(ids) {
+    if (!edited) return false;
+    if (edited.list !== currentList() || (ids && ids.length && ids.join(',') === edited.ids.join(','))) { edited = null; return false; }
+    return true;
+  }
+  let reorderBusy = Promise.resolve();
+  // 曲 v を、並べ替えたあとの順で to 番目（0 始まり）に置く。表示はすぐ変え、YouTube に断られたら元に戻す
+  function reorder(list, ids, v, to) {
+    const info = editFor(list);
+    const from = ids.indexOf(v);
+    if (!info || from < 0 || from === to) return;
+    const next = ids.filter(x => x !== v);
+    next.splice(to, 0, v);
+    const pred = next[to - 1], succ = next[to + 1];
+    const action = pred
+      ? {action: 'ACTION_MOVE_VIDEO_AFTER', setVideoId: info.sets[v], movedSetVideoIdPredecessor: info.sets[pred]}
+      : {action: 'ACTION_MOVE_VIDEO_BEFORE', setVideoId: info.sets[v], movedSetVideoIdSuccessor: info.sets[succ]};
+    if (!action.setVideoId || !(action.movedSetVideoIdPredecessor || action.movedSetVideoIdSuccessor)) {
+      showMessage('この曲は並べ替えられません（曲の情報がありません）', true);
+      return;
+    }
+    log('並べ替え ' + v + ' ' + (from + 1) + ' → ' + (to + 1) + ' 番目');
+    const orders = settings.orders = settings.orders || {};
+    const before = {order: orders[list], edited: edited, ids: info.ids};
+    if (orders[list]) { orders[list] = next; save(); }
+    if (currentList() === list) edited = {list: list, ids: next};
+    info.ids = next;
+    listSig = '';
+    paintView();
+    reorderBusy = reorderBusy.then(async () => {
+      try {
+        const j = await innertube('/youtubei/v1/browse/edit_playlist',
+                                  {playlistId: list, params: info.params || 'CAE%3D', actions: [action]}, '並べ替えできませんでした');
+        if (j && j.status && j.status !== 'STATUS_SUCCEEDED') throw new Error('並べ替えできませんでした（' + j.status + '）');
+      } catch (e) {
+        const text = (e && e.message) || String(e);
+        log('並べ替えの失敗: ' + text);
+        if (before.order && orders[list] === next) { orders[list] = before.order; save(); }
+        if (edited && edited.ids === next) edited = before.edited;
+        if (info.ids === next) info.ids = before.ids;
+        listSig = '';
+        paintView();
+        showMessage(text, true);
+      }
+    });
   }
   // 一覧をどう取れたか（診断で出す）
   let listInfo = null;
@@ -895,9 +1027,21 @@
       } else {
         const it = items();
         out.push(['曲の一覧', it.ids.length > 0,
-                  it.ids.length ? it.ids.length + ' 曲（' + (it.source === 'player' ? 'プレイヤーから' : 'ページの一覧から') + '）'
+                  it.ids.length ? it.ids.length + ' 曲（' + (({player: 'プレイヤーから', edited: '並べ替えた順'})[it.source] || 'ページの一覧から') + '）'
                                 : '読めません（曲送り・シャッフル・全曲リピートが効きません）']);
       }
+    }
+    // 並べ替え（www のアプリの画面で、自分の再生リストだけ）：再生リストそのものを読んで canReorder と各曲の setVideoId があるか
+    const list = shownList();
+    if (isMobile) out.push(['並べ替え', null, 'パソコン版の表示（アプリの画面）でだけ使えます']);
+    else if (!list || list === 'PPSV') out.push(['並べ替え', null, '再生リストを再生していないので確かめられません']);
+    else if (!isOwn(list)) out.push(['並べ替え', null, '自分の再生リストではないので並べ替えられません']);
+    else {
+      await loadEdit(list);
+      const ei = editInfo || {};
+      out.push(['並べ替え', ei.error ? false : ei.canReorder ? ei.ids.length > 0 : null,
+                ei.error ? ei.error : !ei.canReorder ? 'この再生リストは YouTube が並べ替えを許していません'
+                : ei.ids.length ? ei.ids.length + ' 曲を並べ替えられます' : '曲の情報（setVideoId）がありません']);
     }
     return out;
   }
@@ -1101,8 +1245,16 @@
   }
   function fill(list, selected) {
     sel.replaceChildren(el('option', {value: '', textContent: '— 再生リスト —'}));
-    for (const p of list || []) {
-      sel.append(el('option', {value: p.id, textContent: p.count == null ? p.title : p.title + ' (' + p.count + ')'}));
+    // 自分の再生リストと、保存した他の人の再生リストを分けて出す（mine がない古い一覧はそのまま。Windows 版 0.34 と同じ）
+    const all = list || [];
+    const groups = all.some(p => p.mine === true || p.mine === false)
+      ? [['自分の再生リスト', all.filter(p => p.mine !== false)], ['保存した再生リスト（他の人）', all.filter(p => p.mine === false)]]
+      : [[null, all]];
+    for (const [name, ps] of groups) {
+      if (!ps.length) continue;
+      const box = name ? el('optgroup', {label: name}) : sel;
+      for (const p of ps) box.append(el('option', {value: p.id, textContent: p.count == null ? p.title : p.title + ' (' + p.count + ')'}));
+      if (box !== sel) sel.append(box);
     }
     sel.value = selected || '';
     if (sel.value !== (selected || '')) sel.value = '';
@@ -1731,16 +1883,22 @@
     if (listSig && (pendingNav || !listReady(p))) return;  // ページ内で移っている途中は、前の一覧のまま
     learnTitles();
     const vt = virtual(), sc = vt ? null : streamCtx();
-    const ids = vt ? vt.order : sc ? sc.order : playerIds(p);
+    const pids = playerIds(p);
+    const ids = vt ? vt.order : sc ? sc.order : editedActive(pids) ? edited.ids : pids;
     const saved = vt ? vt.saved : sc ? sc.saved : [];
     if (!ids.length && listSig) return;  // 曲送りの直後などで一瞬空になる。作り直さない
-    const sig = ids.join(',') + '|' + saved.length;
+    // 並べ替えられるのは、自分の再生リストで、YouTube が並べ替えを許していて（canReorder）、出している全曲の setVideoId が分かるとき
+    const list = shownList(), ei = editFor(list);
+    const canEdit = !!ei && ei.canReorder && ids.length > 1 && ids.every(v => ei.sets[v]);
+    const sig = ids.join(',') + '|' + saved.length + '|' + canEdit;
+    if (drag && sig !== listSig) endDrag(false);
     const cur = currentVideo();
     if (sig !== listSig) {
       listSig = sig;
       shownCur = '';
       listBox.replaceChildren(...ids.map((v, i) => {
         const item = el('div', {}, {display: 'flex', gap: '10px', alignItems: 'center', padding: '6px 8px', cursor: 'pointer'});
+        if (canEdit) item.append(gripFor(item, v, list, ids));
         item.dataset.v = v;
         const img = el('img', {src: 'https://i.ytimg.com/vi/' + v + '/mqdefault.jpg', loading: 'lazy'},
                        {width: '96px', height: '54px', objectFit: 'cover', borderRadius: '4px', flex: 'none', background: '#222'});
@@ -1767,8 +1925,65 @@
     }
     const opt = sel.selectedOptions[0];
     const n = ids.indexOf(cur) + 1;
-    sideHead.textContent = (opt && opt.value ? opt.textContent : '再生リスト') + (ids.length ? '  ·  ' + (n || '-') + ' / ' + ids.length : '') +
-      (vt ? '  ·  保存分で再生中' : sc ? '  ·  通信して再生中' : '');
+    const pl = (settings.playlists || []).find(x => x.id === list);
+    const whose = pl && pl.mine === true ? '自分' : pl && pl.mine === false ? '他の人' : '';
+    sideHead.textContent = (whose ? '[' + whose + '] ' : '') + (opt && opt.value ? opt.textContent : '再生リスト') +
+      (ids.length ? '  ·  ' + (n || '-') + ' / ' + ids.length : '') +
+      (vt ? '  ·  保存分で再生中' : sc ? '  ·  通信して再生中' : '') + (canEdit ? '  ·  ⠿ で並べ替え' : '');
+    sideHead.style.color = whose === '自分' ? '#9cf' : '#aaa';
+  }
+  // 並べ替えの持ち手。指（またはマウス）で押したまま上下に動かし、離したところへ動かす。
+  // 持ち手の上ではページをスクロールさせない（touch-action: none）。押している間の動きは持ち手が受け取る（setPointerCapture）。
+  // 落とす場所は、その曲の上端（一番下なら最後の曲の下端）に青い線で出す（zoom で拡大しているので、位置を計算して線を置く代わりに枠線を使う）
+  let drag = null;  // {v, item, list, ids, to}
+  function rowsOf() { return [...listBox.children].filter(c => c.dataset && c.dataset.v); }
+  function markDrop(to) {
+    const rows = rowsOf();
+    rows.forEach((r, i) => {
+      r.style.boxShadow = i === to ? 'inset 0 3px 0 #7fb2ff' : to === rows.length && i === rows.length - 1 ? 'inset 0 -3px 0 #7fb2ff' : '';
+    });
+  }
+  function endDrag(drop) {
+    const d = drag;
+    if (!d) return;
+    drag = null;
+    markDrop(-1);
+    d.item.style.opacity = '';
+    if (drop && d.to != null) {
+      const from = d.ids.indexOf(d.v);
+      reorder(d.list, d.ids, d.v, d.to > from ? d.to - 1 : d.to);  // 抜いたあとの位置（自分より下へ動かすときは 1 つ前にずれる）
+    }
+  }
+  function gripFor(item, v, list, ids) {
+    const grip = el('span', {textContent: '⠿', title: 'ドラッグして並べ替え（YouTube の再生リストの順が変わります）'},
+                    {color: '#777', cursor: 'grab', fontSize: '18px', flex: 'none', padding: '6px 4px', margin: '-6px -6px -6px -4px',
+                     touchAction: 'none'});
+    grip.addEventListener('pointerdown', safe(e => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      try { grip.setPointerCapture(e.pointerId); } catch (x) {}
+      drag = {v: v, item: item, list: list, ids: Array.from(ids), to: null};
+      item.style.opacity = '.45';
+    }, 'grip'));
+    grip.addEventListener('pointermove', safe(e => {
+      if (!drag || drag.item !== item) return;
+      const box = listBox.getBoundingClientRect();
+      if (e.clientY < box.top + 30) listBox.scrollTop -= 12;  // 一覧の上下の端に近づいたらスクロール
+      else if (e.clientY > box.bottom - 30) listBox.scrollTop += 12;
+      const rows = rowsOf();
+      let to = rows.length;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i].getBoundingClientRect();
+        if (e.clientY < r.top + r.height / 2) { to = i; break; }
+      }
+      drag.to = to;
+      markDrop(to);
+    }, 'grip'));
+    grip.addEventListener('pointerup', safe(() => endDrag(true), 'grip'));
+    grip.addEventListener('pointercancel', safe(() => endDrag(false), 'grip'));
+    grip.addEventListener('click', e => e.stopPropagation());
+    return grip;
   }
   function paintView() {
     if (!viewShown) return;
